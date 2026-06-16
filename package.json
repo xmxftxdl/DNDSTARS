@@ -15,7 +15,6 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@3d-dice/dice-box": "^1.1.4",
     "@3d-dice/dice-box-threejs": "^0.0.12",
     "@tailwindcss/vite": "^4.3.0",
     "cannon-es": "^0.20.0",
