@@ -4428,67 +4428,6 @@ export default function MapsPage() {
       })
       return
     }
-    let dodgeApSpent = false
-    if (wantsDodge) {
-      if (!canAttemptDodge(latestTarget)) {
-        alert('行动点不足，无法尝试闪避。')
-        return
-      }
-      const spent = spendAP(latestTarget.id, 1)
-      if (!spent) {
-        alert('行动点不足，无法尝试闪避。')
-        return
-      }
-      const attackerName = activeMap.tokens.find((t) => t.id === prompt.result.attackerTokenId)?.label ?? '敌人'
-      pushApLog(latestTarget, 1, '尝试闪避', `应对 ${attackerName} 的攻击`)
-      dodgeApSpent = true
-    }
-    suppressedDodgePromptIdsRef.current.add(prompt.id)
-    setSharedDodgePrompt(null)
-    if (wantsDodge) {
-      void saveSharedResource<SharedDodgeState>('dodge', {
-        id: prompt.id,
-        mapId: activeMap.id,
-        status: 'rolling',
-        result: prompt.result,
-        targetCharId: latestTarget.id,
-        wantsDodge,
-        dodgeApSpent,
-        updatedAt: Date.now(),
-      })
-    }
-    const dodgeD20 =
-      wantsDodge && dodgeApSpent
-        ? await rollDiceBoxD20('闪避判定 D20', latestTarget.name)
-        : undefined
-    if (dodgeD20 != null) {
-      publishSharedDiceRoll({
-        values: [],
-        sides: 20,
-        bonus: 0,
-        total: 0,
-        label: '闪避判定',
-        targetName: latestTarget.name,
-        d20Roll: {
-          value: Number(dodgeD20),
-          modifier: ENEMY_MELEE_ATTACK_BONUS,
-          ac: latestTarget.ac,
-          hit: Number(dodgeD20) + ENEMY_MELEE_ATTACK_BONUS >= latestTarget.ac,
-          kind: 'dodge',
-        },
-      })
-    }
-    void saveSharedResource<SharedDodgeState>('dodge', {
-      id: prompt.id,
-      mapId: activeMap.id,
-      status: 'answered',
-      result: prompt.result,
-      targetCharId: latestTarget.id,
-      wantsDodge,
-      dodgeD20,
-      dodgeApSpent,
-      updatedAt: Date.now(),
-    })
   }
 
   const scheduleEnemyTurn = async (enemy: Token) => {
