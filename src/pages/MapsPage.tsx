@@ -699,18 +699,7 @@ export default function MapsPage() {
   }
 
   const publishDiceStream = (event: SharedDiceStreamPayload) => {
-    if (!activeMap || !mode) return
-    const requestId = 'requestId' in event ? event.requestId : `${Date.now()}`
-    const index = 'index' in event ? event.index : 0
-    const eventId = `${requestId}:${event.type}:${index}:${Date.now()}:${Math.random().toString(36).slice(2)}`
-    const targetMode = mode === 'dm' ? 'player' : 'dm'
-    void publishSharedEvent<SharedDiceStreamEvent>(`dice-stream-${mode}-to-${targetMode}`, {
-      ...event,
-      eventId,
-      mapId: activeMap.id,
-      sourceMode: mode,
-      updatedAt: Date.now(),
-    } as SharedDiceStreamEvent)
+    void event
   }
 
   // T-P2-398 (398-A): broadcast the decided result once. One logical event per
