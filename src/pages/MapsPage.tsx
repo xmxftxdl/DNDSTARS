@@ -27,7 +27,7 @@ import {
 } from 'lucide-react'
 import EmptyState from '../components/EmptyState'
 import MapCanvas from '../components/map/MapCanvas'
-import type { MapProjectile } from '../components/map/MapCanvas'
+import type { DeleteSelectionRect, MapProjectile } from '../components/map/MapCanvas'
 import InitiativeTracker, {
   INITIATIVE_VISIBLE_MAX,
   type InitiativeEntry,
@@ -382,6 +382,16 @@ function buildInitiativeOrder(tokens: Token[], characters: Character[]): Initiat
     .sort((a, b) => b.roll - a.roll)
 }
 
+function tokenIntersectsDeleteRect(token: Token, rect: DeleteSelectionRect, gridSize: number): boolean {
+  const tokenSize = Math.max(1, token.size || 1) * gridSize
+  const half = tokenSize / 2
+  const left = token.x - half
+  const right = token.x + half
+  const top = token.y - half
+  const bottom = token.y + half
+  return right >= rect.x && left <= rect.x + rect.width && bottom >= rect.y && top <= rect.y + rect.height
+}
+
 export default function MapsPage() {
   const fileRef = useRef<HTMLInputElement>(null)
   const maps = useMapStore((s) => s.maps)
@@ -430,6 +440,7 @@ export default function MapsPage() {
   const [activeCharId, setActiveCharId] = useState<string | null>(null)
   const [charPanel, setCharPanel] = useState<CharDockPanel | null>(null)
   const [measureMode, setMeasureMode] = useState(false)
+  const [deleteSelectMode, setDeleteSelectMode] = useState(false)
   const [showBar, setShowBar] = useState(true) // 顶部控件浮层是否显示
   const [gridDetecting, setGridDetecting] = useState(false)
   const [gridAdjustMode, setGridAdjustMode] = useState(false)
@@ -829,20 +840,27 @@ export default function MapsPage() {
 
   const applySharedCombatState = (state: SharedCombatState | null) => {
     if (!state || !activeMap || state.mapId !== activeMap.id) return
-    const snapshot = JSON.stringify(state)
+    const validTokenIds = new Set(activeMap.tokens.map((token) => token.id))
+    const initiativeOrder = (state.initiativeOrder ?? []).filter((entry) => validTokenIds.has(entry.tokenId))
+    const initiativeIndex = initiativeOrder.length > 0
+      ? Math.min(Math.max(0, state.initiativeIndex ?? 0), initiativeOrder.length - 1)
+      : 0
+    const active = Boolean(state.active && initiativeOrder.length > 0)
+    const enemyApByToken = Object.fromEntries(
+      Object.entries(state.enemyApByToken ?? {}).filter(([tokenId]) => validTokenIds.has(tokenId)),
+    )
+    const snapshot = JSON.stringify({ state, tokenIds: Array.from(validTokenIds).sort() })
     if (snapshot === lastSharedCombatSnapshot) return
     lastSharedCombatSnapshot = snapshot
     applyingSharedCombatRef.current = true
-    setCombatActive(state.active)
+    setCombatActive(active)
     setRound(state.round)
-    setInitiativeOrder(state.initiativeOrder)
-    initiativeOrderRef.current = state.initiativeOrder
-    setInitiativeIndex(state.initiativeIndex)
-    initiativeIndexRef.current = state.initiativeIndex
-    if (state.enemyApByToken) {
-      enemyApByTokenRef.current = state.enemyApByToken
-      setEnemyApByToken(state.enemyApByToken)
-    }
+    setInitiativeOrder(initiativeOrder)
+    initiativeOrderRef.current = initiativeOrder
+    setInitiativeIndex(initiativeIndex)
+    initiativeIndexRef.current = initiativeIndex
+    enemyApByTokenRef.current = enemyApByToken
+    setEnemyApByToken(enemyApByToken)
     window.setTimeout(() => {
       applyingSharedCombatRef.current = false
     }, 0)
@@ -897,6 +915,25 @@ export default function MapsPage() {
   const selectedToken = activeMap?.tokens.find((t) => t.id === selectedTokenId) ?? null
   const selectedCharacterToken = activeMap?.tokens.find((t) => t.id === selectedCharacterTokenId) ?? null
   const activeChar = characters.find((c) => c.id === activeCharId) ?? null
+
+  const handleDeleteBoxConfirm = (rect: DeleteSelectionRect) => {
+    if (!isDM || !activeMap) return
+    const tokenIds = activeMap.tokens
+      .filter((token) => tokenIntersectsDeleteRect(token, rect, activeMap.gridSize))
+      .filter((token) => !combatActive || token.type === 'obstacle')
+      .map((token) => token.id)
+    if (tokenIds.length === 0) {
+      setDeleteSelectMode(false)
+      return
+    }
+    const label = combatActive
+      ? `删除选框内 ${tokenIds.length} 个障碍物？`
+      : `删除选框内 ${tokenIds.length} 个单位/障碍物？`
+    if (window.confirm(label)) {
+      tokenIds.forEach((tokenId) => removeToken(activeMap.id, tokenId))
+    }
+    setDeleteSelectMode(false)
+  }
 
   const resetRoundApForActiveMap = (reason: string) => {
     if (mode !== 'dm') return useCharacterStore.getState().characters
@@ -5340,7 +5377,7 @@ export default function MapsPage() {
               selectedTokenId={selectedTokenId}
               onSelectToken={handleSelectToken}
               isDM={isDM}
-              measureMode={isDM && measureMode && !targeting && !showMoveRange && !gridAdjustMode}
+              measureMode={isDM && measureMode && !targeting && !showMoveRange && !gridAdjustMode && !deleteSelectMode}
               hpByToken={hpByToken}
               tokenBadges={tokenBadges}
               tokenHoverLabels={tokenHoverLabels}
@@ -5359,6 +5396,9 @@ export default function MapsPage() {
                 setTargeting(null)
                 setAoePreviewCell(null)
               }}
+              deleteSelectMode={isDM && deleteSelectMode && !targeting && !showMoveRange && !gridAdjustMode && !measureMode}
+              onDeleteBoxConfirm={handleDeleteBoxConfirm}
+              onDeleteCancel={() => setDeleteSelectMode(false)}
               onBlankContextMenu={() => {
                 setSelectedTokenId(null)
                 setSelectedCharacterTokenId(null)
@@ -5847,7 +5887,10 @@ export default function MapsPage() {
                     onClick={() => {
                       setGridAdjustMode((v) => {
                         const next = !v
-                        if (next) setMeasureMode(false)
+                        if (next) {
+                          setMeasureMode(false)
+                          setDeleteSelectMode(false)
+                        }
                         return next
                       })
                     }}
@@ -5947,7 +5990,10 @@ export default function MapsPage() {
                     onClick={() =>
                       setMeasureMode((v) => {
                         const next = !v
-                        if (next) setGridAdjustMode(false)
+                        if (next) {
+                          setGridAdjustMode(false)
+                          setDeleteSelectMode(false)
+                        }
                         return next
                       })
                     }
@@ -5958,6 +6004,31 @@ export default function MapsPage() {
                     title="测距：点 A 点 B；右键/Backspace 删除"
                   >
                     <Ruler className="h-3.5 w-3.5" />
+                  </button>
+                  <button
+                    onClick={() =>
+                      setDeleteSelectMode((v) => {
+                        const next = !v
+                        if (next) {
+                          setMeasureMode(false)
+                          setGridAdjustMode(false)
+                          setTargeting(null)
+                          setAoePreviewCell(null)
+                          setShowMoveRange(false)
+                        }
+                        return next
+                      })
+                    }
+                    className={[
+                      'flex items-center gap-1 rounded-lg px-2 py-1 text-xs font-medium transition-colors',
+                      deleteSelectMode
+                        ? 'bg-rose-500/25 text-rose-200'
+                        : 'text-slate-400 hover:bg-white/5',
+                    ].join(' ')}
+                    title={combatActive ? '框选删除：战斗中只删除障碍物，右键取消' : '框选删除：拖拽选框删除单位/障碍物，右键取消'}
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                    框删
                   </button>
 
                   <label className="flex items-center gap-1 rounded-lg bg-arcane-500/15 px-2 py-1 text-xs font-medium text-arcane-200">
