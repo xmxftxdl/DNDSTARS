@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
-import { loadSharedResource, saveSharedResource } from '../lib/sharedApi'
-import { isPlayerPort } from '../lib/appMode'
+import { loadSharedResource, publishSharedEvent, saveSharedResource, subscribeSharedEvent } from '../lib/sharedApi'
+import { isPlayerPort, modeFromPort } from '../lib/appMode'
 import {
   canLearnSkill,
   canUpgradeSkillRank,
@@ -43,11 +43,48 @@ function uid(): string {
 let lastSharedCharactersSnapshot = ''
 let lastLocalCharactersWriteAt = 0
 let characterSaveSeq = 0
+let traitChoiceSyncStarted = false
+let stopTraitChoiceSync: (() => void) | null = null
+const seenTraitChoiceEventIds = new Set<string>()
+const pendingLocalTraitChoices = new Map<string, { characterId: string; groupId: string; updatedAt: number }>()
 
 interface SharedCharactersState {
   characters: Character[]
   selectedId: string | null
   updatedAt?: number
+}
+
+interface SharedTraitChoiceEvent {
+  eventId: string
+  sourceMode: 'player' | 'dm'
+  characterId: string
+  groupId: string
+  options: TraitChoiceOption[]
+  updatedAt: number
+}
+
+function traitChoicePendingKey(characterId: string, groupId: string): string {
+  return `${characterId}:${groupId}`
+}
+
+function markLocalTraitChoicePending(characterId: string, groupId: string) {
+  pendingLocalTraitChoices.set(traitChoicePendingKey(characterId, groupId), {
+    characterId,
+    groupId,
+    updatedAt: Date.now(),
+  })
+}
+
+function publishPlayerTraitChoice(characterId: string, groupId: string, options: TraitChoiceOption[]) {
+  const event: SharedTraitChoiceEvent = {
+    eventId: `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+    sourceMode: 'player',
+    characterId,
+    groupId,
+    options,
+    updatedAt: Date.now(),
+  }
+  void publishSharedEvent<SharedTraitChoiceEvent>('character-trait-choice-player-to-dm', event)
 }
 
 function rollD4(count: number): number {
@@ -83,6 +120,44 @@ function mergePlayerWritableCharacter(local: Character, shared: Character): Char
 }
 
 /** 自定义规则战斗字段的默认值 */
+function mergePendingLocalTraitChoices(sharedCharacters: Character[], localCharacters: Character[]): Character[] {
+  if (!isPlayerPort() || pendingLocalTraitChoices.size === 0) return sharedCharacters
+  const localById = new Map(localCharacters.map((ch) => [ch.id, ch]))
+  const now = Date.now()
+
+  return sharedCharacters.map((shared) => {
+    const local = localById.get(shared.id)
+    if (!local) return shared
+
+    let shouldPreserveLocalChoice = false
+    for (const [key, pending] of pendingLocalTraitChoices) {
+      if (pending.characterId !== shared.id) continue
+      if (shared.traitChoicesDone?.[pending.groupId]) {
+        pendingLocalTraitChoices.delete(key)
+        continue
+      }
+      const localHasChoice = !!local.traitChoicesDone?.[pending.groupId]
+      const stillFresh = now - pending.updatedAt < 30000
+      if (localHasChoice && stillFresh) {
+        shouldPreserveLocalChoice = true
+      } else {
+        pendingLocalTraitChoices.delete(key)
+      }
+    }
+
+    if (!shouldPreserveLocalChoice) return shared
+    return finalizeCharacter({
+      ...shared,
+      traits: local.traits,
+      traitChoicesDone: local.traitChoicesDone,
+      archerLv1ChoiceDone: local.archerLv1ChoiceDone,
+      archerLv3ChoiceDone: local.archerLv3ChoiceDone,
+      featureUpgradePoints: local.featureUpgradePoints,
+      skillRanks: local.skillRanks,
+    })
+  })
+}
+
 function combatDefaults() {
   return {
     saveDC: 12,
@@ -256,6 +331,51 @@ function applyMetaReward(c: Character, metaKey: MetaChoiceKey): Character {
 }
 
 /** 示例角色：从 SAMPLE 模板补全缺失的默认技能（不影响已有技能） */
+function applyTraitChoiceToCharacter(
+  character: Character,
+  groupId: string,
+  options: TraitChoiceOption[],
+): Character {
+  const group = TRAIT_CHOICE_GROUPS.find((g) => g.id === groupId)
+  if (!group) return character
+
+  let next = { ...character }
+  const choicesDone = { ...(next.traitChoicesDone ?? {}), [groupId]: true }
+  if (groupId === 'archer-lv1') next = { ...next, archerLv1ChoiceDone: true }
+  if (groupId === 'archer-lv3') next = { ...next, archerLv3ChoiceDone: true }
+
+  if (group.autoGrant?.length || group.autoGrantFeatures?.length) {
+    for (const meta of group.autoGrant ?? []) {
+      next = applyMetaReward(next, meta)
+    }
+    for (const fKey of group.autoGrantFeatures ?? []) {
+      const exists = next.traits.some((t) => t.featureKey === fKey)
+      if (!exists) {
+        next = {
+          ...next,
+          traits: [...next.traits, createClassTrait(fKey, next.level)],
+        }
+      }
+    }
+  } else {
+    for (const opt of options) {
+      if (opt.kind === 'meta' && opt.metaKey) {
+        next = applyMetaReward(next, opt.metaKey)
+      } else if (opt.kind === 'feature' && opt.featureKey) {
+        const exists = next.traits.some((t) => t.featureKey === opt.featureKey)
+        if (!exists) {
+          next = {
+            ...next,
+            traits: [...next.traits, createClassTrait(opt.featureKey, next.level)],
+          }
+        }
+      }
+    }
+  }
+
+  return syncArcherCombatSkills(syncQiForCharacter(syncArcherTraits({ ...next, traitChoicesDone: choicesDone })))
+}
+
 function mergeMissingSampleSkills(c: Character): Character {
   const template = SAMPLE.find((s) => s.id === c.id)
   if (!template) return c
@@ -642,7 +762,12 @@ interface CharacterState {
   learnSkill: (charId: string, skillId: string) => boolean
   applyArcherLv1Choice: (charId: string, key: ClassFeatureKey) => void
   applyArcherLv3Choice: (charId: string, key: ClassFeatureKey) => void
-  applyTraitChoice: (charId: string, groupId: string, options: TraitChoiceOption[]) => void
+  applyTraitChoice: (
+    charId: string,
+    groupId: string,
+    options: TraitChoiceOption[],
+    opts?: { fromRemote?: boolean },
+  ) => void
   spendQi: (charId: string, amount?: number) => boolean
   useQiReduceCooldown: (charId: string, skillId: string) => boolean
 }
@@ -710,8 +835,10 @@ export const useCharacterStore = create<CharacterState>()(
           const snapshot = JSON.stringify(shared)
           if (snapshot === lastSharedCharactersSnapshot) return
           lastSharedCharactersSnapshot = snapshot
+          const sharedCharacters = shared.characters.map(finalizeCharacter)
+          const localCharacters = get().characters
           set({
-            characters: shared.characters.map(finalizeCharacter),
+            characters: mergePendingLocalTraitChoices(sharedCharacters, localCharacters),
             selectedId: shared.selectedId ?? shared.characters[0]?.id ?? null,
           })
           if (shared.updatedAt != null) lastLocalCharactersWriteAt = shared.updatedAt
@@ -1091,48 +1218,16 @@ export const useCharacterStore = create<CharacterState>()(
           ])
         },
 
-        applyTraitChoice: (charId, groupId, options) => {
-          const group = TRAIT_CHOICE_GROUPS.find((g) => g.id === groupId)
+        applyTraitChoice: (charId, groupId, options, opts) => {
           const c = get().characters.find((x) => x.id === charId)
-          if (!group || !c) return
+          if (!c || !TRAIT_CHOICE_GROUPS.some((g) => g.id === groupId)) return
 
-          updateChar(charId, (ch) => {
-            let next = { ...ch }
-            const choicesDone = { ...(next.traitChoicesDone ?? {}), [groupId]: true }
-            if (groupId === 'archer-lv1') next = { ...next, archerLv1ChoiceDone: true }
-            if (groupId === 'archer-lv3') next = { ...next, archerLv3ChoiceDone: true }
+          updateChar(charId, (ch) => applyTraitChoiceToCharacter(ch, groupId, options))
 
-            if (group.autoGrant?.length || group.autoGrantFeatures?.length) {
-              for (const meta of group.autoGrant ?? []) {
-                next = applyMetaReward(next, meta)
-              }
-              for (const fKey of group.autoGrantFeatures ?? []) {
-                const exists = next.traits.some((t) => t.featureKey === fKey)
-                if (!exists) {
-                  next = {
-                    ...next,
-                    traits: [...next.traits, createClassTrait(fKey, next.level)],
-                  }
-                }
-              }
-            } else {
-              for (const opt of options) {
-                if (opt.kind === 'meta' && opt.metaKey) {
-                  next = applyMetaReward(next, opt.metaKey)
-                } else if (opt.kind === 'feature' && opt.featureKey) {
-                  const exists = next.traits.some((t) => t.featureKey === opt.featureKey)
-                  if (!exists) {
-                    next = {
-                      ...next,
-                      traits: [...next.traits, createClassTrait(opt.featureKey, next.level)],
-                    }
-                  }
-                }
-              }
-            }
-
-            return syncArcherCombatSkills(syncQiForCharacter(syncArcherTraits({ ...next, traitChoicesDone: choicesDone })))
-          })
+          if (isPlayerPort() && !opts?.fromRemote) {
+            markLocalTraitChoicePending(charId, groupId)
+            publishPlayerTraitChoice(charId, groupId, options)
+          }
         },
 
         spendQi: (charId, amount = 1) => {
@@ -1303,3 +1398,38 @@ export const useCharacterStore = create<CharacterState>()(
     },
   ),
 )
+
+export function startCharacterTraitChoiceSync(): () => void {
+  if (traitChoiceSyncStarted) return () => {}
+  if (modeFromPort() !== 'dm') return () => {}
+
+  traitChoiceSyncStarted = true
+  stopTraitChoiceSync = subscribeSharedEvent<SharedTraitChoiceEvent>(
+    'character-trait-choice-player-to-dm',
+    (event) => {
+      if (
+        !event ||
+        event.sourceMode !== 'player' ||
+        Date.now() - event.updatedAt > 300000 ||
+        seenTraitChoiceEventIds.has(event.eventId)
+      ) {
+        return
+      }
+      seenTraitChoiceEventIds.add(event.eventId)
+      if (seenTraitChoiceEventIds.size > 500) {
+        seenTraitChoiceEventIds.clear()
+      }
+
+      const state = useCharacterStore.getState()
+      const character = state.characters.find((ch) => ch.id === event.characterId)
+      if (!character || character.traitChoicesDone?.[event.groupId]) return
+      state.applyTraitChoice(event.characterId, event.groupId, event.options, { fromRemote: true })
+    },
+  )
+
+  return () => {
+    stopTraitChoiceSync?.()
+    stopTraitChoiceSync = null
+    traitChoiceSyncStarted = false
+  }
+}

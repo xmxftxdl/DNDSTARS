@@ -9,7 +9,7 @@ import CombatPage from './pages/CombatPage'
 import AIPage from './pages/AIPage'
 import { modeFromPort } from './lib/appMode'
 import { useMapStore } from './store/maps'
-import { useCharacterStore } from './store/characters'
+import { startCharacterTraitChoiceSync, useCharacterStore } from './store/characters'
 
 export default function App() {
   const [collapsed, setCollapsed] = useState(false)
@@ -26,6 +26,8 @@ export default function App() {
     }, 2000)
     return () => window.clearInterval(timer)
   }, [endpointMode, loadSharedCharacters, loadSharedMaps])
+
+  useEffect(() => startCharacterTraitChoiceSync(), [endpointMode])
 
   return (
     <div className="flex h-screen w-screen overflow-hidden">
