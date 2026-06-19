@@ -126,5 +126,6 @@ describe('archer document skill tree config', () => {
     expect(text).toContain('目标：单体')
     expect(text).toContain('伤害：3D4 点钝击伤害')
     expect(text).toContain('目标处于击飞状态时额外造成 1D6 点钝击伤害')
+    expect(def.tiers.every((tier) => (tier.damageBonus ?? 0) === 0)).toBe(true)
   })
 })

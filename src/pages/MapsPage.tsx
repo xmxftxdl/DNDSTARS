@@ -1959,48 +1959,86 @@ export default function MapsPage() {
     }
   }
 
+  const resolveAnimatedKnockbackSave = async (
+    caster: Character,
+    token: Token,
+    targetChar: Character | undefined,
+    label: string,
+    options?: { disadvantage?: boolean },
+  ) => {
+    const d20 = await rollDiceBoxD20(`${label} D20`, token.label)
+    const d20Second = options?.disadvantage
+      ? await rollDiceBoxD20(`${label} 劣势 D20`, token.label)
+      : undefined
+    return resolveKnockbackSave(caster, token, targetChar, {
+      disadvantage: options?.disadvantage,
+      d20,
+      d20Second,
+    })
+  }
+
+  const resolveAnimatedConSave = async (
+    caster: Character,
+    token: Token,
+    targetChar: Character | undefined,
+    label: string,
+    options?: { disadvantage?: boolean },
+  ) => {
+    const d20 = await rollDiceBoxD20(`${label} D20`, token.label)
+    const d20Second = options?.disadvantage
+      ? await rollDiceBoxD20(`${label} 劣势 D20`, token.label)
+      : undefined
+    return resolveConSave(caster, token, targetChar, {
+      disadvantage: options?.disadvantage,
+      d20,
+      d20Second,
+    })
+  }
+
   const showKnockbackSaveRoll = (
     pending: KnockbackPending,
     index: number,
     queue: KnockbackPending[],
   ) => {
-    if (!activeMap) return
-    const caster = useCharacterStore.getState().characters.find((c) => c.id === pending.casterId)
-    const token = activeMap.tokens.find((t) => t.id === pending.tokenId)
-    if (!caster || !token) {
+    void (async () => {
+      if (!activeMap) return
+      const caster = useCharacterStore.getState().characters.find((c) => c.id === pending.casterId)
+      const token = activeMap.tokens.find((t) => t.id === pending.tokenId)
+      if (!caster || !token) {
+        if (index + 1 < queue.length) {
+          afterRollRef.current = () => showKnockbackSaveRoll(queue[index + 1], index + 1, queue)
+        }
+        return
+      }
+      const targetChar = pending.targetCharId
+        ? useCharacterStore.getState().characters.find((c) => c.id === pending.targetCharId)
+        : undefined
+      const save = await resolveAnimatedKnockbackSave(caster, token, targetChar, '击飞敏捷豁免', {
+        disadvantage: pending.skill.knockbackSaveDisadvantage,
+      })
+      applyKnockbackFromSave(pending.tokenId, pending.targetCharId, caster, pending.casterId, save)
+      const saveLabel = formatKnockbackSaveLabel(save)
+
       if (index + 1 < queue.length) {
         afterRollRef.current = () => showKnockbackSaveRoll(queue[index + 1], index + 1, queue)
       }
-      return
-    }
-    const targetChar = pending.targetCharId
-      ? useCharacterStore.getState().characters.find((c) => c.id === pending.targetCharId)
-      : undefined
-    const save = resolveKnockbackSave(caster, token, targetChar, {
-      disadvantage: pending.skill.knockbackSaveDisadvantage,
-    })
-    applyKnockbackFromSave(pending.tokenId, pending.targetCharId, caster, pending.casterId, save)
-    const saveLabel = formatKnockbackSaveLabel(save)
 
-    if (index + 1 < queue.length) {
-      afterRollRef.current = () => showKnockbackSaveRoll(queue[index + 1], index + 1, queue)
-    }
-
-    setRoll({
-      values: [],
-      sides: 20,
-      bonus: 0,
-      total: 0,
-      label: saveLabel,
-      targetName: pending.tokenLabel,
-      d20Roll: {
-        value: save.saveD20,
-        modifier: save.saveMod,
-        ac: save.dc,
-        hit: save.success,
-        kind: 'save',
-      },
-    })
+      setRoll({
+        values: [],
+        sides: 20,
+        bonus: 0,
+        total: 0,
+        label: saveLabel,
+        targetName: pending.tokenLabel,
+        d20Roll: {
+          value: save.saveD20,
+          modifier: save.saveMod,
+          ac: save.dc,
+          hit: save.success,
+          kind: 'save',
+        },
+      })
+    })()
   }
 
   const scheduleKnockbackRolls = (queue: KnockbackPending[]) => {
@@ -2472,6 +2510,14 @@ export default function MapsPage() {
             values = [...values, ...extraValues]
           }
         }
+        if (
+          skill.skillTreeId === 'windKickCombo' &&
+          (targetKnockedBeforeAttack || caster!.combatBuffs?.windKickTreatKnockbackTargetId === token.id)
+        ) {
+          const extraValues = await rollDiceBoxValues(1, 6, `${skill.name} 击飞额外伤害`, token.label)
+          values = [...values, ...extraValues]
+          featureExtraLabelParts.push('击飞目标+1d6')
+        }
         const doubleArrowExtra = await appendDoubleArrowDamageDice(
           values,
           caster!,
@@ -2556,6 +2602,14 @@ export default function MapsPage() {
             const extraValues = await rollDiceBoxValues(extraD6Count, 6, `${skill.name} 击飞伤害`, token.label)
             values = [...values, ...extraValues]
           }
+        }
+        if (
+          skill.skillTreeId === 'windKickCombo' &&
+          (targetKnockedBeforeAttack || caster.combatBuffs?.windKickTreatKnockbackTargetId === token.id)
+        ) {
+          const extraValues = await rollDiceBoxValues(1, 6, `${skill.name} 击飞额外伤害`, token.label)
+          values = [...values, ...extraValues]
+          featureExtraLabelParts.push('击飞目标+1d6')
         }
         const doubleArrowExtra = await appendDoubleArrowDamageDice(
           values,
@@ -2722,7 +2776,9 @@ export default function MapsPage() {
     if (hit) {
       const dexMode = dexSaveDamageMode(skill.skillTreeId)
       if (caster && dexMode && total > 0) {
-        const save = resolveKnockbackSave(caster, token, targetChar)
+        const save = await resolveAnimatedKnockbackSave(caster, token, targetChar, `${skill.name} 敏捷豁免`, {
+          disadvantage: skill.knockbackSaveDisadvantage,
+        })
         dexSaveLabel = formatSkillDexSaveLabel(save, dexMode)
         if (dexMode === 'fail-half' && !save.success) {
           total = Math.floor(total / 2)
@@ -2831,10 +2887,10 @@ export default function MapsPage() {
         multiStrikeHitsRef.current[hitKey] = hits
         if (hits >= 3 && (caster.qi ?? 0) >= 1 && window.confirm(`多重打击：${token.label} 本回合已受到 ${hits} 段攻击。消耗 1 点气使其体质劣势豁免，失败眩晕？`)) {
           if (spendQi(caster.id, 1)) {
-            const saveA = resolveConSave(caster, token, targetChar)
-            const saveB = resolveConSave(caster, token, targetChar)
-            const save = saveA.saveTotal <= saveB.saveTotal ? saveA : saveB
-            stunSaveLabel = `${formatConSaveLabel(save)}（劣势：${saveA.saveD20}/${saveB.saveD20}）`
+            const save = await resolveAnimatedConSave(caster, token, targetChar, '多重打击体质豁免', {
+              disadvantage: true,
+            })
+            stunSaveLabel = formatConSaveLabel(save)
             if (!save.success) tokenPatch.stunTurns = STUN_DEFAULT_TURNS
             multiStrikeHitsRef.current[hitKey] = 0
           }
@@ -2905,7 +2961,7 @@ export default function MapsPage() {
           addConditionToCharacter(caster.id, NO_MOVE_STATUS_LABEL)
         }
         if (skillRank >= 5 && (skill.arrowShots ?? 0) >= 5) {
-          const save = resolveConSave(caster, token, targetChar)
+          const save = await resolveAnimatedConSave(caster, token, targetChar, `${skill.name} 体质豁免`)
           stunSaveLabel = formatConSaveLabel(save)
           if (!save.success) tokenPatch.stunTurns = STUN_DEFAULT_TURNS
         }
@@ -3020,7 +3076,7 @@ export default function MapsPage() {
         skill.skillTreeId != null &&
         skillGrantsStun(skill.skillTreeId, stunSkillRank)
       if (grantsStun) {
-        const save = resolveConSave(caster!, token, targetChar)
+        const save = await resolveAnimatedConSave(caster!, token, targetChar, `${skill.name} 体质豁免`)
         stunSaveLabel = formatConSaveLabel(save)
         if (!save.success) {
           tokenPatch.stunTurns = STUN_DEFAULT_TURNS

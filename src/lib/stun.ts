@@ -20,12 +20,12 @@ export function resolveConSave(
   caster: Character,
   token: Token,
   targetChar?: Character,
-  options?: { disadvantage?: boolean },
+  options?: { disadvantage?: boolean; d20?: number; d20Second?: number },
 ): ConSaveResult {
   const dc = caster.saveDC
   const saveMod = getTokenAbilityMod(token, 'con', targetChar)
-  const d20a = rollD20()
-  const d20b = options?.disadvantage ? rollD20() : undefined
+  const d20a = options?.d20 ?? rollD20()
+  const d20b = options?.d20Second ?? (options?.disadvantage ? rollD20() : undefined)
   const saveD20 = d20b != null ? Math.min(d20a, d20b) : d20a
   const saveTotal = saveD20 + saveMod
   const success = saveTotal >= dc

@@ -327,10 +327,10 @@ export const ARCHER_SKILL_TREE: ArcherSkillDef[] = [
     treeRow: 0,
     tiers: [
       { damageCount: 3, damageSides: 4, detail: '移动至多 15 尺，对终点 5 尺内一名敌人造成 3D4 钝击伤害；击飞状态额外 1D6；命中后可推动 5 尺。' },
-      { damageCount: 4, damageSides: 4, damageBonus: 6, detail: '造成 4D4+1D6 点伤害。' },
-      { damageCount: 5, damageSides: 4, damageBonus: 6, detail: '造成 5D4+1D6 点伤害；命中后可额外推动目标 5 尺。' },
-      { damageCount: 5, damageSides: 4, damageBonus: 12, detail: '造成 5D4+2D6 点伤害；推动撞上障碍物额外 1D6。' },
-      { damageCount: 6, damageSides: 4, damageBonus: 12, detail: '造成 6D4+2D6 点伤害；目标击飞时本技能 CD -1。' },
+      { damageCount: 4, damageSides: 4, detail: '造成 4D4 点伤害；目标击飞时额外 1D6。' },
+      { damageCount: 5, damageSides: 4, detail: '造成 5D4 点伤害；目标击飞时额外 1D6；命中后可额外推动目标 5 尺。' },
+      { damageCount: 5, damageSides: 4, detail: '造成 5D4 点伤害；目标击飞时额外 1D6；推动撞上障碍物额外 1D6。' },
+      { damageCount: 6, damageSides: 4, detail: '造成 6D4 点伤害；目标击飞时额外 1D6，且本技能 CD -1。' },
     ],
   },
   {
