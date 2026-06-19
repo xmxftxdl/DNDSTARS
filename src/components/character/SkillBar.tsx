@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { Gauge, Zap, Plus, Trash2, SkipForward, X, Timer, Crosshair, Infinity } from 'lucide-react'
 import { useCharacterStore } from '../../store/characters'
@@ -58,6 +58,13 @@ export default function SkillBar({
   const removeSkill = useCharacterStore((s) => s.removeSkill)
 
   const [editingId, setEditingId] = useState<string | null>(null)
+  const xScrollRef = useRef<HTMLDivElement | null>(null)
+  const xDragRef = useRef<{
+    pointerId: number
+    startX: number
+    startScrollLeft: number
+    dragging: boolean
+  } | null>(null)
 
   if (!character) return null
   const c = character
@@ -76,6 +83,50 @@ export default function SkillBar({
     if (!confirm(`删除技能「${skill.name}」？`)) return
     removeSkill(charId, skill.id)
     if (editingId === skill.id) setEditingId(null)
+  }
+
+  const startColumnDragScroll = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (!scrollColumns || event.button !== 0) return
+    const target = event.target as HTMLElement
+    if (target.closest('button,input,textarea,select,a')) return
+    const el = xScrollRef.current
+    if (!el) return
+    xDragRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startScrollLeft: el.scrollLeft,
+      dragging: false,
+    }
+    el.setPointerCapture?.(event.pointerId)
+  }
+
+  const moveColumnDragScroll = (event: React.PointerEvent<HTMLDivElement>) => {
+    const drag = xDragRef.current
+    const el = xScrollRef.current
+    if (!drag || !el || drag.pointerId !== event.pointerId) return
+    const dx = event.clientX - drag.startX
+    if (Math.abs(dx) > 3) drag.dragging = true
+    if (!drag.dragging) return
+    event.preventDefault()
+    el.scrollLeft = drag.startScrollLeft - dx
+  }
+
+  const endColumnDragScroll = (event: React.PointerEvent<HTMLDivElement>) => {
+    const drag = xDragRef.current
+    const el = xScrollRef.current
+    if (!drag || drag.pointerId !== event.pointerId) return
+    el?.releasePointerCapture?.(event.pointerId)
+    xDragRef.current = null
+  }
+
+  const handleColumnWheel = (event: React.WheelEvent<HTMLDivElement>) => {
+    if (!scrollColumns) return
+    const el = xScrollRef.current
+    if (!el || Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return
+    const canScroll = el.scrollWidth > el.clientWidth
+    if (!canScroll) return
+    event.preventDefault()
+    el.scrollLeft += event.deltaY
   }
 
   return (
@@ -140,9 +191,15 @@ export default function SkillBar({
         ].join(' ')}
       >
         <div
+          ref={xScrollRef}
+          onPointerDown={startColumnDragScroll}
+          onPointerMove={moveColumnDragScroll}
+          onPointerUp={endColumnDragScroll}
+          onPointerCancel={endColumnDragScroll}
+          onWheel={handleColumnWheel}
           className={
             scrollColumns
-              ? 'flex gap-2 overflow-x-auto overscroll-contain pb-2'
+              ? 'skillbar-x-scroll flex cursor-grab touch-pan-y select-none gap-2 overflow-x-auto overscroll-contain pb-2 active:cursor-grabbing'
               : `grid grid-cols-4 gap-2 sm:grid-cols-9 ${fillHeight ? 'h-full' : ''}`
           }
         >
