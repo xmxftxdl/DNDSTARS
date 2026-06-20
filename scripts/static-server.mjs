@@ -1,8 +1,19 @@
 import { createReadStream } from 'node:fs'
-import { mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
+import {
+  IMAGE_MAX_BYTES,
+  STATE_MAX_BYTES,
+  atomicWriteLocked,
+  authorizeStateWrite,
+  enforceImageQuota,
+  extractSecret,
+  pushBacklog,
+  replaySlice,
+  safeName,
+} from './shared-server-core.mjs'
 
 const args = new Map()
 for (let i = 2; i < process.argv.length; i += 1) {
@@ -32,7 +43,6 @@ const legacyStateRoot = path.join(legacySharedRoot, 'state')
 const legacyImageRoot = path.join(legacySharedRoot, 'images')
 const eventClients = new Map()
 const eventBacklog = new Map()
-const EVENT_BACKLOG_LIMIT = 1200
 
 const mimeTypes = new Map([
   ['.css', 'text/css; charset=utf-8'],
@@ -64,13 +74,26 @@ function setCors(res) {
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
 }
 
-function safeName(value) {
-  return String(value ?? '').replace(/[^a-zA-Z0-9_-]/g, '')
-}
-
-async function readBody(req) {
+// AC3：限制请求体大小，超过 maxBytes 即抛 413 标记错误。
+// 注意：超限后继续把剩余分块吞掉（drain）而非 req.destroy()，否则会 ECONNRESET，
+// 客户端拿不到干净的 413。drain 完再抛，让上层把 413 完整写回。
+async function readBody(req, maxBytes = STATE_MAX_BYTES) {
   const chunks = []
-  for await (const chunk of req) chunks.push(chunk)
+  let total = 0
+  let over = false
+  for await (const chunk of req) {
+    total += chunk.length
+    if (total > maxBytes) {
+      over = true
+      continue
+    }
+    if (!over) chunks.push(chunk)
+  }
+  if (over) {
+    const err = new Error('Payload Too Large')
+    err.statusCode = 413
+    throw err
+  }
   return Buffer.concat(chunks)
 }
 
@@ -85,7 +108,8 @@ function addEventClient(channel, res) {
     'Access-Control-Allow-Origin': '*',
   })
   res.write(`event: ready\ndata: {"channel":"${channel}"}\n\n`)
-  const backlog = eventBacklog.get(channel) ?? []
+  // AC3：只回放最近 EVENT_REPLAY_LIMIT 条，而非整 backlog。
+  const backlog = replaySlice(eventBacklog.get(channel) ?? [])
   for (const payload of backlog) {
     res.write(`event: message\ndata: ${JSON.stringify(payload)}\n\n`)
   }
@@ -96,9 +120,7 @@ function addEventClient(channel, res) {
 }
 
 function publishEvent(channel, payload) {
-  const backlog = eventBacklog.get(channel) ?? []
-  backlog.push(payload)
-  if (backlog.length > EVENT_BACKLOG_LIMIT) backlog.splice(0, backlog.length - EVENT_BACKLOG_LIMIT)
+  const backlog = pushBacklog(eventBacklog.get(channel) ?? [], payload)
   eventBacklog.set(channel, backlog)
   const clients = eventClients.get(channel)
   if (!clients) return
@@ -160,12 +182,18 @@ async function handleApi(req, res, parsed) {
       return true
     }
     if (req.method === 'PUT') {
+      // AC2：DM 权威资源鉴权（flag 未设则永远放行）。
+      const auth = authorizeStateWrite(name, extractSecret(req))
+      if (!auth.ok) {
+        res.writeHead(auth.status, { 'Content-Type': 'application/json; charset=utf-8' })
+        res.end(JSON.stringify({ error: 'unauthorized' }))
+        return true
+      }
       await mkdir(stateRoot, { recursive: true })
       const body = await readBody(req)
       JSON.parse(body.toString('utf8'))
-      const tmpPath = `${filePath}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`
-      await writeFile(tmpPath, body)
-      await rename(tmpPath, filePath)
+      // AC1：跨进程写锁 + 既有原子 temp+rename。
+      await atomicWriteLocked(filePath, body)
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' })
       res.end('{"ok":true}')
       return true
@@ -205,9 +233,11 @@ async function handleApi(req, res, parsed) {
     }
     if (req.method === 'PUT') {
       await mkdir(imageRoot, { recursive: true })
-      const body = await readBody(req)
+      const body = await readBody(req, IMAGE_MAX_BYTES)
       await writeFile(filePath, body)
       await writeFile(metaPath, JSON.stringify({ type: req.headers['content-type'] || 'application/octet-stream' }))
+      // AC4：写后即触发配额 GC（write-trigger，按 mtime 最旧优先淘汰）。
+      await enforceImageQuota(imageRoot)
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' })
       res.end('{"ok":true}')
       return true
@@ -221,7 +251,10 @@ async function handleApi(req, res, parsed) {
     }
   }
 
-  return false
+  // AC5：未匹配的 /api/* 不应回落到静态 index.html（旧 bug 返回 200）。返回 404。
+  res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' })
+  res.end('{"error":"Not Found"}')
+  return true
 }
 
 async function findStaticFile(requestPath) {
@@ -243,7 +276,8 @@ const server = http.createServer(async (req, res) => {
       if (await handleApi(req, res, parsed)) return
     } catch (error) {
       setCors(res)
-      res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' })
+      const status = Number(error?.statusCode) || 500
+      res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' })
       res.end(JSON.stringify({ error: String(error?.message ?? error) }))
       return
     }

@@ -51,7 +51,7 @@ import DiceRollOverlay from '../components/DiceRollOverlay'
 import type { DiceRoll } from '../components/DiceRollOverlay'
 import DiceBoxD20Overlay from '../components/DiceBoxD20Overlay'
 import DiceBoxRollOverlay from '../components/DiceBoxRollOverlay'
-import { useMapStore } from '../store/maps'
+import { useMapStore, characterHpTokenPatch } from '../store/maps'
 import type { Token } from '../store/maps'
 import { useCharacterStore } from '../store/characters'
 import {
@@ -81,7 +81,7 @@ import {
   offerGaleCombo,
   resolvePhysicalEnemyHit,
 } from '../lib/archerBaseFeatures'
-import { TOKEN_STATUS_CLEAR_PATCH } from '../lib/combatStatus'
+import { TOKEN_STATUS_CLEAR_PATCH, isMovementLocked, isTokenMovementLocked } from '../lib/combatStatus'
 import {
   attackDamageDiceCount,
   getEffectiveAbilityMod,
@@ -117,9 +117,9 @@ import {
   isWithinMovementRange,
   cellDistance,
   movementRadiusPx,
+  occupiedCells,
   pixelToCell,
   snapToCellCenter,
-  TOKEN_MOVE_DURATION_S,
   type GridCell,
 } from '../lib/gridCombat'
 import {
@@ -135,16 +135,19 @@ import {
 } from '../lib/skillTargeting'
 import { applyGridDetectPatch, detectGridFromBlob, detectImageGrid } from '../lib/gridDetect'
 import { getImage } from '../lib/imageStore'
-import { planEnemyTurn, type EnemyTurnResult } from '../lib/enemyAi'
+import { clearEnemyAiWarnings, planEnemyTurn, type EnemyTurnResult } from '../lib/enemyAi'
 import { decideDodge } from '../lib/aiPolicy'
 import {
   checkCombatOutcome,
+  decideTurnAction,
+  hasActionableActor,
   isTokenAlive,
   isTokenDefeated,
   pruneInitiativeForToken,
 } from '../lib/combatTokens'
 import { enemyTemplateToTokenPatch, type EnemyTemplate } from '../lib/enemyPool'
 import { IGNITE_STATUS_LABEL } from '../lib/ignite'
+import { dotDamageFor } from '../lib/statusDamage'
 import {
   formatKnockbackSaveLabel,
   getTokenAbilityMod,
@@ -170,216 +173,49 @@ import {
   PLAYER_ASSIGNMENT_EVENT,
 } from '../lib/playerView'
 import { proficiencyBonus } from '../lib/dnd'
-
-type Mode = 'dm' | 'player'
-
-interface SharedCombatState {
-  mapId: string
-  combatId?: string
-  active: boolean
-  round: number
-  initiativeIndex: number
-  initiativeOrder: InitiativeEntry[]
-  enemyApByToken?: Record<string, { current: number; max: number }>
-  updatedAt: number
-}
+// [T15/G3] god-object 拆分：模块级类型/常量/纯 helper 搬到独立文件，行为不变，原样 import 回来。
+import type {
+  Mode,
+  SharedCombatState,
+  SharedDodgeState,
+  SharedStableMindState,
+  SharedPlayerActionState,
+  SharedPlayerActionAckState,
+  SharedDiceState,
+  SharedDiceEventsState,
+  SharedRollRequestEvent,
+  SharedRollRequestPayload,
+  SharedCombatLogState,
+  CombatLogEntry,
+} from './mapsPageTypes'
+import {
+  STATUS_LABEL,
+  RESTRAINED_STATUS_LABEL,
+  VULNERABLE_STATUS_LABEL,
+  NO_MOVE_STATUS_LABEL,
+  TOKEN_MOVE_MS,
+  DICE_ROLL_MS,
+  ADVANCE_DELAY_MS,
+  ADVANCE_GUARD_MS,
+  DEATH_KEY_WATCHDOG_MS,
+} from './mapsPageConstants'
+import {
+  reconcileEnemyAp,
+  singleTargetRangeFeet,
+  statusDuration,
+  buildInitiativeOrder,
+  tokenIntersectsDeleteRect,
+  seededDieValue,
+} from './mapsPageHelpers'
+// [T15/G3] enemyApReconcile.test.ts 从 './MapsPage' 引用 reconcileEnemyAp —— 维持该 re-export。
+export { reconcileEnemyAp }
 
 let lastSharedCombatSnapshot = ''
+// [T11/AC6 · E6] 已应用的 combat 快照单调水位（按 combatId 分段）。
+// 玩家端用它丢弃乱序/陈旧的 combat 广播；新 combatId（开/换战斗）重置水位，避免跨战斗误判。
+let lastAppliedCombatUpdatedAt = 0
+let lastAppliedCombatId = ''
 
-interface SharedDodgeState {
-  id: string
-  mapId: string
-  status: 'pending' | 'rolling' | 'answered' | 'done'
-  result: EnemyTurnResult
-  targetCharId: string
-  wantsDodge?: boolean
-  dodgeD20?: number
-  dodgeApSpent?: boolean
-  expiresAt?: number
-  updatedAt: number
-}
-
-interface SharedStableMindState {
-  id: string
-  mapId: string
-  status: 'pending' | 'answered' | 'done'
-  targetCharId: string
-  targetName: string
-  fullDamage: number
-  damageAfterSave: number
-  saveD20: number
-  saveMod: number
-  saveTotal: number
-  dc: number
-  useStableMind?: boolean
-  expiresAt?: number
-  updatedAt: number
-}
-
-interface SharedPlayerActionState {
-  id: string
-  mapId: string
-  combatId?: string
-  sourceMode: 'player'
-  status: 'pending' | 'done'
-  type: 'end-turn' | 'attack-token' | 'aoe-attack' | 'move-token' | 'qi-reduce-cooldown' | 'activate-feature'
-  actorTokenId: string
-  characterId: string
-  targetTokenId?: string
-  targetTokenIds?: string[]
-  targetCell?: GridCell
-  targetPosition?: { x: number; y: number }
-  aoeRectRotation?: number
-  skillId?: string
-  featureKey?: ClassFeatureKey
-  round: number
-  initiativeIndex: number
-  seq: number
-  updatedAt: number
-}
-
-interface SharedPlayerActionAckState {
-  id: string
-  mapId: string
-  combatId?: string
-  actionId: string
-  status: 'accepted' | 'rejected'
-  reason?: string
-  acceptedPosition?: { x: number; y: number }
-  round: number
-  initiativeIndex: number
-  updatedAt: number
-}
-
-interface SharedDiceState {
-  id: string
-  mapId: string
-  sourceMode: Mode
-  status?: 'rolling' | 'result'
-  kind?: 'd20' | 'dice'
-  count?: number
-  sides?: number
-  values?: number[]
-  flyIndex?: number
-  label?: string
-  targetName?: string
-  roll?: DiceRoll
-  updatedAt: number
-}
-
-interface SharedDiceEventsState {
-  mapId: string
-  events: SharedDiceState[]
-  updatedAt: number
-}
-
-// T-P2-398 (398-A): result-broadcast path. DM emits ONE roll-request carrying
-// the already-decided values; each end self-renders the @values face
-// independently. The terminal face is carried by `values`, never reproduced
-// from a determinism field.
-interface SharedRollRequestEvent {
-  eventId: string
-  mapId: string
-  sourceMode: Mode
-  requestId: string
-  kind: 'd20' | 'dice'
-  count: number
-  sides: number
-  values: number[]
-  label: string
-  targetName: string
-  updatedAt: number
-}
-
-type SharedRollRequestPayload = Omit<
-  SharedRollRequestEvent,
-  'eventId' | 'mapId' | 'sourceMode' | 'updatedAt'
->
-
-interface SharedCombatLogState {
-  mapId: string
-  entries: CombatLogEntry[]
-  updatedAt: number
-}
-
-type StatusType = 'burning' | 'poison'
-type CombatLogEntry = {
-  id: number
-  round: number
-  text: string
-  kind: 'system' | 'turn' | 'attack' | 'damage'
-  time: string
-}
-
-const STATUS_LABEL: Record<StatusType, string> = { burning: '燃烧', poison: '中毒' }
-const RESTRAINED_STATUS_LABEL = '束缚'
-const VULNERABLE_STATUS_LABEL = '脆弱'
-const NO_MOVE_STATUS_LABEL = '无法移动'
-
-const TOKEN_MOVE_MS = Math.ceil(TOKEN_MOVE_DURATION_S * 1000) + 80
-const DICE_ROLL_MS = 3200
-
-const SINGLE_TARGET_RANGE_FEET: Record<string, number> = {
-  basicShot: 90,
-  multiShot: 30,
-  clusterShot: 20,
-  netArrow: 60,
-  explosiveArrow: 60,
-  vineHookShot: 20,
-  magicArrow: 60,
-  arcaneBreak: 90,
-  windStepShot: 60,
-}
-
-function singleTargetRangeFeet(skill: CombatSkill): number | null {
-  if (!skill.tags?.includes('ranged') && !isBasicShot(skill)) return null
-  if (skill.skillTreeId && SINGLE_TARGET_RANGE_FEET[skill.skillTreeId] != null) {
-    return SINGLE_TARGET_RANGE_FEET[skill.skillTreeId]
-  }
-  return 90
-}
-
-function statusDuration(skill: CombatSkill, type: StatusType): number | undefined {
-  if (skill.statusOnHit === type) return skill.statusDuration ?? (type === 'burning' ? 3 : 4)
-  if (type === 'burning' && skill.name === '火球术') return skill.statusDuration ?? 3
-  if (type === 'poison' && skill.name === '毒云术') return skill.statusDuration ?? 4
-  return undefined
-}
-
-function rollInitiative(_token: Token, character?: Character): number {
-  const d20 = 1 + Math.floor(Math.random() * 20)
-  if (character) {
-    return d20 + getEffectiveAbilityMod(character, 'dex') + character.initiativeBonus
-  }
-  return d20 + Math.floor(Math.random() * 5)
-}
-
-function buildInitiativeOrder(tokens: Token[], characters: Character[]): InitiativeEntry[] {
-  return tokens
-    .filter((token) => token.type !== 'obstacle')
-    .map((token) => {
-      const ch = token.characterId ? characters.find((c) => c.id === token.characterId) : undefined
-      return {
-        tokenId: token.id,
-        label: token.label,
-        emoji: token.emoji,
-        color: token.color,
-        accent: ch?.accent,
-        roll: rollInitiative(token, ch),
-      }
-    })
-    .sort((a, b) => b.roll - a.roll)
-}
-
-function tokenIntersectsDeleteRect(token: Token, rect: DeleteSelectionRect, gridSize: number): boolean {
-  const tokenSize = Math.max(1, token.size || 1) * gridSize
-  const half = tokenSize / 2
-  const left = token.x - half
-  const right = token.x + half
-  const top = token.y - half
-  const bottom = token.y + half
-  return right >= rect.x && left <= rect.x + rect.width && bottom >= rect.y && top <= rect.y + rect.height
-}
 
 export default function MapsPage() {
   const fileRef = useRef<HTMLInputElement>(null)
@@ -567,6 +403,11 @@ export default function MapsPage() {
   const [showMoveRange, setShowMoveRange] = useState(false)
   const [disengagedCharIds, setDisengagedCharIds] = useState<Set<string>>(() => new Set())
   const enemyAppliedKeysRef = useRef(new Set<string>())
+  // [T1] dedupe set so the turn-driver doesn't stack multiple skip timers for the
+  // same npc/obstacle slot across re-renders. Cleared on combat start/end.
+  const nonActorSkippedKeysRef = useRef(new Set<string>())
+  // [T3/C2] dedupe set for stun skips (same anti-stack purpose). Cleared on start/end.
+  const stunSkippedKeysRef = useRef(new Set<string>())
   const enemyTurnTimersRef = useRef<number[]>([])
   const pendingSharedDodgeRef = useRef<{
     id: string
@@ -605,24 +446,6 @@ export default function MapsPage() {
     sharedStableMindPrompt?.id,
     sharedStableMindPrompt?.expiresAt,
   ])
-
-  const hashDiceSeed = (text: string): number => {
-    let hash = 2166136261
-    for (let i = 0; i < text.length; i += 1) {
-      hash ^= text.charCodeAt(i)
-      hash = Math.imul(hash, 16777619)
-    }
-    return hash >>> 0
-  }
-
-  const seededDieValue = (seed: string, sides: number): number => {
-    let state = hashDiceSeed(seed) || 1
-    state = (state + 0x6d2b79f5) | 0
-    let next = Math.imul(state ^ (state >>> 15), 1 | state)
-    next ^= next + Math.imul(next ^ (next >>> 7), 61 | next)
-    const unit = ((next ^ (next >>> 14)) >>> 0) / 4294967296
-    return 1 + Math.floor(unit * Math.max(2, Math.round(sides)))
-  }
 
   useEffect(() => {
     enemyApByTokenRef.current = enemyApByToken
@@ -813,13 +636,24 @@ export default function MapsPage() {
       ? Math.min(Math.max(0, state.initiativeIndex ?? 0), initiativeOrder.length - 1)
       : 0
     const active = Boolean(state.active && initiativeOrder.length > 0)
-    const enemyApByToken = Object.fromEntries(
-      Object.entries(state.enemyApByToken ?? {}).filter(([tokenId]) => validTokenIds.has(tokenId)),
+    // [T10/AC4] 硬化撕裂读：字段缺失而本端持有已花 AP 时保留本端，避免凭空恢复 AP 到 {2,2}。
+    const enemyApByToken = reconcileEnemyAp(
+      state.enemyApByToken,
+      enemyApByTokenRef.current,
+      validTokenIds,
     )
+    const incomingCombatId = state.combatId ?? ''
+    // [T11/AC6 · E6] 单调 guard：同一 combatId 下丢弃 updatedAt 严格更旧的乱序广播。
+    // combatId 变化（新战斗/换战斗）⇒ 重置水位后照常接受。这样陈旧快照不会回退玩家端战斗态，
+    // 而真正更新的快照（更大 updatedAt 或新 combatId）一定不被压制。
+    const incomingUpdatedAt = state.updatedAt ?? 0
+    if (incomingCombatId === lastAppliedCombatId && incomingUpdatedAt < lastAppliedCombatUpdatedAt) return
     const snapshot = JSON.stringify({ state, tokenIds: Array.from(validTokenIds).sort() })
+    // equality 短路只在内容真正未变时触发，不压制更新的 apply（内容变 ⇒ snapshot 必不同）。
     if (snapshot === lastSharedCombatSnapshot) return
     lastSharedCombatSnapshot = snapshot
-    const incomingCombatId = state.combatId ?? ''
+    lastAppliedCombatId = incomingCombatId
+    lastAppliedCombatUpdatedAt = incomingUpdatedAt
     const combatChanged = incomingCombatId !== combatIdRef.current
     applyingSharedCombatRef.current = true
     combatIdRef.current = incomingCombatId
@@ -955,6 +789,8 @@ export default function MapsPage() {
       ? `删除选框内 ${tokenIds.length} 个障碍物？`
       : `删除选框内 ${tokenIds.length} 个单位/障碍物？`
     if (window.confirm(label)) {
+      // [T8/AC1 · D1] 选框删除若命中当前选中 token，立即清空选中态（守卫 effect 之外的显式清理）。
+      if (selectedTokenId && tokenIds.includes(selectedTokenId)) setSelectedTokenId(null)
       tokenIds.forEach((tokenId) => removeToken(activeMap.id, tokenId))
     }
     setDeleteSelectMode(false)
@@ -1073,7 +909,7 @@ export default function MapsPage() {
       }
       if (seenSharedDiceIdsRef.current.has(state.id) || !state.roll) return
       seenSharedDiceIdsRef.current.add(state.id)
-      setRoll({ ...state.roll, diceBoxResolved: true })
+      setRoll({ ...state.roll })
     }
     const load = async () => {
       const eventState = await loadSharedResource<SharedDiceEventsState>('dice-events')
@@ -1125,6 +961,12 @@ export default function MapsPage() {
     if (combatActive && initiativeOrder.length === 0) return
     publishCombatState()
   }, [activeMap?.id, combatActive, round, initiativeIndex, initiativeOrder, enemyApByToken])
+
+  // [T8/AC2 · D2] 任何地图切换都清空选中态：不仅 DM 下拉，也覆盖程序化 select()、
+  // 远端/玩家跟随、removeMap 自动重选。监听 activeMap?.id 即可统一处理所有路径。
+  useEffect(() => {
+    setSelectedTokenId(null)
+  }, [activeMap?.id])
 
   const chooseMode = (next: Mode) => {
     if (forcedMode && next !== forcedMode) return
@@ -1490,6 +1332,17 @@ export default function MapsPage() {
       .map((t) => t.id)
   }, [activeMap?.tokens, characterHpKey, tokenHpKey, characters])
 
+  // [T8/AC1 · D1] 选中的 token 被删除（选框删除 / 面板删除）或阵亡（HP→0 / defeated）后，
+  // 不应继续渲染虚线选中环。统一守卫：选中 id 不再存在于当前地图，或已进入 defeated 集合时清空。
+  // 与既有 6 处 setSelectedTokenId(null) 互补（additive，不替换）。
+  useEffect(() => {
+    if (!selectedTokenId) return
+    const stillPresent = activeMap?.tokens.some((t) => t.id === selectedTokenId)
+    if (!stillPresent || defeatedTokenIds.includes(selectedTokenId)) {
+      setSelectedTokenId(null)
+    }
+  }, [selectedTokenId, activeMap?.tokens, defeatedTokenIds])
+
   const aoeCasterCell = useMemo((): GridCell | null => {
     if (!activeMap || !targeting) return null
     const casterToken = activeMap.tokens.find((t) => t.characterId === targeting.casterId)
@@ -1634,6 +1487,53 @@ export default function MapsPage() {
     return () => window.removeEventListener('keydown', onKey)
   }, [targeting])
 
+  // [T8/AC9 · D13] 选中 token 的键盘操作：方向键移动一格、Delete/Backspace 删除。
+  // 仅 DM；在 input/textarea/contentEditable 中输入时不触发；不引入玩家端权威写入（沿用既有 DM 路径）。
+  useEffect(() => {
+    if (!isDM || !activeMap || !selectedToken) return
+    const onKey = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null
+      const tag = target?.tagName?.toLowerCase()
+      if (tag === 'input' || tag === 'textarea' || target?.isContentEditable) return
+      // 拖动/测距/网格调整等模式下不接管键盘
+      if (deleteSelectMode || measureMode || gridAdjustMode || targeting || showMoveRange) return
+
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        e.preventDefault()
+        setSelectedTokenId(null)
+        removeToken(activeMap.id, selectedToken.id)
+        return
+      }
+
+      const deltas: Record<string, [number, number]> = {
+        ArrowUp: [0, -1],
+        ArrowDown: [0, 1],
+        ArrowLeft: [-1, 0],
+        ArrowRight: [1, 0],
+      }
+      const delta = deltas[e.key]
+      if (!delta) return
+      e.preventDefault()
+      const from = pixelToCell(selectedToken.x, selectedToken.y, activeMap)
+      const to: GridCell = { col: from.col + delta[0], row: from.row + delta[1] }
+      // 目标格被其它 token 占用则不移动（与拖放占格规则一致）
+      const blocked = occupiedCells(activeMap.tokens, activeMap, selectedToken.id)
+      if (blocked.has(cellKey(to))) return
+      updateToken(activeMap.id, selectedToken.id, cellToPixel(to, activeMap))
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [
+    isDM,
+    activeMap,
+    selectedToken,
+    deleteSelectMode,
+    measureMode,
+    gridAdjustMode,
+    targeting,
+    showMoveRange,
+  ])
+
   const tokenBadges = useMemo(() => {
     const badges: Record<
       string,
@@ -1736,11 +1636,20 @@ export default function MapsPage() {
     const key = `${tokenId}:${charId ?? ''}`
     if (pendingDeathKeysRef.current.has(key)) return
     pendingDeathKeysRef.current.add(key)
-    afterRollCallbacksRef.current.push(() => {
+    // [T2/A6] Clearing was gated solely on a future DiceRollOverlay onDone. If that
+    // overlay is superseded by another roll (or never completes), the key was never
+    // cleared and tryEndCombatIfNeeded() returned false forever — combat could not end
+    // even with everyone dead. resolve() is idempotent (clear-once via Set membership),
+    // so whichever fires first — onDone or the watchdog — wins and the other no-ops.
+    const resolve = () => {
+      if (!pendingDeathKeysRef.current.has(key)) return
       pendingDeathKeysRef.current.delete(key)
       clearStatusesOnDeath(tokenId, charId)
       tryEndCombatIfNeeded()
-    })
+    }
+    afterRollCallbacksRef.current.push(resolve)
+    const watchdog = window.setTimeout(resolve, DEATH_KEY_WATCHDOG_MS)
+    enemyTurnTimersRef.current.push(watchdog)
   }
 
   type KnockbackPending = {
@@ -2058,10 +1967,8 @@ export default function MapsPage() {
     if (token.characterId) {
       damageChar(token.characterId, amount)
       const updated = useCharacterStore.getState().characters.find((c) => c.id === token.characterId)
-      updateToken(activeMap.id, token.id, {
-        hp: updated?.currentHp,
-        maxHp: updated?.maxHp,
-      })
+      // [T10/AC1] 经唯一镜像 helper 写回 token.hp。
+      if (updated) updateToken(activeMap.id, token.id, characterHpTokenPatch(updated))
       if (updated && updated.currentHp <= 0) deferDeathHandling(token.id, token.characterId)
     } else if (token.maxHp != null) {
       const hp = Math.max(0, (token.hp ?? token.maxHp) - amount)
@@ -2316,7 +2223,7 @@ export default function MapsPage() {
     let isCrit = false
     let rollLabel: string
     let d20Roll:
-      | { value: number; modifier: number; ac: number; hit: boolean; isCrit?: boolean; source?: 'dice-box' }
+      | { value: number; modifier: number; ac: number; hit: boolean; isCrit?: boolean }
       | undefined
     let selfCooldownReduction = 0
     let featureExtraLabelParts: string[] = []
@@ -2426,7 +2333,6 @@ export default function MapsPage() {
         ac: atk.ac,
         hit,
         isCrit,
-        source: 'dice-box',
       }
 
       const d20Text =
@@ -2768,6 +2674,7 @@ export default function MapsPage() {
                 attackerInput,
                 characterToCombatInput(targetChar),
                 damageType,
+                (token.vulnerableTurns ?? 0) > 0, // [T4/C3]
               )
             : adjustDamageAgainstToken(total, attackerInput, token, damageType)
         const finalDamage = adjustedDamage.damage
@@ -3128,7 +3035,6 @@ export default function MapsPage() {
         formula: damageFormula,
         targetName: token.label,
         d20Roll,
-        diceBoxResolved: true,
       }
       setRoll(rollForDisplay)
       publishSharedDiceRoll(rollForDisplay)
@@ -3362,7 +3268,6 @@ export default function MapsPage() {
       sides: isBasicShot(skill) ? 8 : skill.damageSides,
       bonus: combinedTotal - combinedValues.reduce((sum, value) => sum + value, 0),
       total: combinedTotal,
-      diceBoxResolved: true,
       label: `${skill.name} · ${cellCount} 格 · ${targets.length} 名在范围内${anyHit ? '' : '（无命中）'}`,
       formula: anyHit
         ? `${combinedValues.join(' + ')}${combinedTotal - combinedValues.reduce((sum, value) => sum + value, 0) >= 0 ? ' + ' : ' - '}${Math.abs(combinedTotal - combinedValues.reduce((sum, value) => sum + value, 0))} = ${combinedTotal}`
@@ -3384,25 +3289,31 @@ export default function MapsPage() {
   const applyDamageToToken = async (
     target: Token,
     amount: number,
-    opts?: { damageType?: 'physical' | 'magic'; caster?: Character },
+    opts?: { damageType?: 'physical' | 'magic'; caster?: Character; raw?: boolean },
   ) => {
     if (!activeMap) return
     const damageType = opts?.damageType ?? 'physical'
     const attackerInput = opts?.caster ? characterToCombatInput(opts.caster) : undefined
     if (target.characterId) {
       const ch = useCharacterStore.getState().characters.find((c) => c.id === target.characterId)
-      const finalAmount = ch
+      // [T3] raw=true (DOT ticks) bypasses the attack/defense modifier so the per-tick
+      // HP loss is exactly the configured constant, independent of defender resistances.
+      const finalAmount = opts?.raw
+        ? amount
+        : ch
         ? applyAttackDefenseDamageModifier(
             amount,
             attackerInput,
             characterToCombatInput(ch),
             damageType,
+            (target.vulnerableTurns ?? 0) > 0, // [T4/C3]
           ).damage
         : amount
       damageChar(target.characterId, finalAmount)
       const updated = useCharacterStore.getState().characters.find((c) => c.id === target.characterId)
       if (updated) {
-        const patch: Partial<Token> = { hp: updated.currentHp, maxHp: updated.maxHp }
+        // [T10/AC1] DOT 每回合掉血路径同样经唯一镜像 helper 写回 token.hp。
+        const patch: Partial<Token> = characterHpTokenPatch(updated)
         if (
           finalAmount > 0 &&
           opts?.caster &&
@@ -3737,6 +3648,7 @@ export default function MapsPage() {
             attacker ? characterToCombatInput(attacker) : enemyCombatInput(attackerToken.poolId ?? ''),
             characterToCombatInput(targetChar),
             'physical',
+            (targetToken.vulnerableTurns ?? 0) > 0, // [T4/C3]
           )
         : adjustDamageAgainstToken(critRaw, attacker ? characterToCombatInput(attacker) : enemyCombatInput(attackerToken.poolId ?? ''), targetToken, 'physical')
       total = adjusted.damage
@@ -3748,7 +3660,8 @@ export default function MapsPage() {
           damageChar(targetChar.id, total)
           const updated = useCharacterStore.getState().characters.find((c) => c.id === targetChar.id)
           if (updated) {
-            updateToken(activeMap.id, targetToken.id, { hp: updated.currentHp, maxHp: updated.maxHp })
+            // [T10/AC1] 经唯一镜像 helper 写回 token.hp。
+            updateToken(activeMap.id, targetToken.id, characterHpTokenPatch(updated))
             if (updated.currentHp <= 0) deferDeathHandling(targetToken.id, targetChar.id)
           }
         } else if (targetToken.maxHp != null) {
@@ -3772,9 +3685,7 @@ export default function MapsPage() {
         ac: targetAc,
         hit,
         isCrit,
-        source: 'dice-box',
       },
-      diceBoxResolved: true,
     })
     pushCombatLog(
       `${attackerName} 借机攻击 ${targetName}：D20 ${d20} + ${attackBonus} = ${d20 + attackBonus} vs AC ${targetAc}，${hit ? '命中' : '未命中'}${formula ? `；伤害 ${formula}` : ''}；最终 ${total} 点伤害`,
@@ -3847,8 +3758,8 @@ export default function MapsPage() {
     }
 
     if (!myPlayerToken || !turnCharacter || !showMoveRange || !moveCircle) return
-    if (turnCharacter.conditions.includes(NO_MOVE_STATUS_LABEL)) {
-      alert('该角色本回合无法移动')
+    if (isMovementLocked(turnCharacter.conditions)) {
+      alert('该角色本回合无法移动') // [T4/C4/C8] no-move OR restrained
       return
     }
     const center = { x: moveCircle.centerX, y: moveCircle.centerY }
@@ -4204,39 +4115,6 @@ export default function MapsPage() {
             return
           }
         }
-        /*
-        if (false && targeting.skill.skillTreeId === 'rageShot') {
-          const caster = characters.find((c) => c.id === targeting.casterId)
-          const rank = caster ? getSkillRank(caster, 'rageShot') : 0
-          if (rank >= 4 && activeMap) {
-            const candidates = activeMap.tokens.filter(
-              (t) => t.id !== tok.id && t.characterId !== targeting.casterId && isTokenAlive(t, characters),
-            )
-            const picked = candidates.length > 0
-              ? window.prompt(
-                  `怒气爆射可额外选择 1 名目标，输入编号；留空跳过：\n${candidates
-                    .map((t, i) => `${i + 1}. ${t.label}`)
-                    .join('\n')}`,
-                )
-              : null
-            const extra = candidates[Number(picked) - 1]
-            void (async () => {
-              await resolveAttack(tok, { skipCleanup: true })
-              if (extra) {
-                await resolveAttack(extra, {
-                  skipCleanup: true,
-                  skipUseSkill: true,
-                  silent: true,
-                })
-                pushCombatLog(`${targeting.skill.name} 额外目标：${extra.label} 已结算`, 'damage')
-              }
-              setTargeting(null)
-              setAoePreviewCell(null)
-            })()
-            return
-          }
-        }
-        */
         const attackTargeting = {
           casterId: targeting.casterId,
           skill: targeting.skill,
@@ -4331,6 +4209,14 @@ export default function MapsPage() {
     enemyTurnTimersRef.current = []
   }
 
+  // [T2/A8] Previously enemy-turn timers were only cleared in startCombat/endCombat,
+  // so switching maps mid-enemy-turn left old timers firing against the new map's
+  // initiativeOrderRef (cross-map pollution), and unmount leaked them. This cleanup
+  // clears the pending timer chain whenever the active map changes or the page unmounts.
+  useEffect(() => {
+    return () => clearEnemyTurnTimers()
+  }, [activeMap?.id])
+
   const clearCombatMessageQueues = async (
     mapId: string,
     options: { clearCombatLog?: boolean; combatId?: string } = {},
@@ -4419,6 +4305,8 @@ export default function MapsPage() {
     setCombatLogOpen(true)
     await clearCombatMessageQueues(activeMap.id, { clearCombatLog: true, combatId: nextCombatId })
     enemyAppliedKeysRef.current.clear()
+    nonActorSkippedKeysRef.current.clear()
+    stunSkippedKeysRef.current.clear()
     playerTurnStartedRef.current.clear()
     multiStrikeHitsRef.current = {}
     setDisengagedCharIds(new Set())
@@ -4472,6 +4360,7 @@ export default function MapsPage() {
       void clearCombatMessageQueues(activeMap.id, { clearCombatLog: false })
     }
     clearEnemyTurnTimers()
+    clearEnemyAiWarnings() // [T7/AC6] 战斗结束清空回退告警去重集合，防止无界增长。
     setDodgePrompt(null)
     afterRollRef.current = null
     setRoll(null)
@@ -4483,6 +4372,8 @@ export default function MapsPage() {
     initiativeIndexRef.current = 0
     setInitiativeScroll(0)
     enemyAppliedKeysRef.current.clear()
+    nonActorSkippedKeysRef.current.clear()
+    stunSkippedKeysRef.current.clear()
     playerTurnStartedRef.current.clear()
     multiStrikeHitsRef.current = {}
     setDisengagedCharIds(new Set())
@@ -4606,13 +4497,11 @@ export default function MapsPage() {
           ac: number
           hit: boolean
           kind?: 'dodge' | 'save'
-          source?: 'dice-box'
         }
       | undefined
     let damageRollValues = result.attack?.values ?? []
     let damageRollTotal = result.attack?.total ?? 0
     let damageRollBonus = result.attack?.bonus ?? 0
-    let damageDiceResolved = false
     const enemyFeatureLabels: string[] = []
     const enemyActorToken = activeMap.tokens.find((t) => t.id === result.attackerTokenId)
     const enemyTargetToken = activeMap.tokens.find((t) => t.id === result.targetTokenId)
@@ -4661,7 +4550,7 @@ export default function MapsPage() {
         {
           id: `${enemyResolutionSession.context.actionId}:damage:${result.targetTokenId ?? 'target'}`,
           source: {
-            tokenId: result.attackerTokenId,
+            tokenId: result.attackerTokenId ?? enemyActorToken?.id ?? '',
             characterId: enemyActorToken?.characterId,
           },
           target: {
@@ -4711,6 +4600,7 @@ export default function MapsPage() {
           attackerInput,
           characterToCombatInput(targetChar),
           'physical',
+          (activeMap.tokens.find((t) => t.id === result.targetTokenId)?.vulnerableTurns ?? 0) > 0, // [T4/C3]
         )
         rawDamage = adjusted.damage
         damageRollBonus = rawDamage - diceTotal
@@ -4719,7 +4609,6 @@ export default function MapsPage() {
         damageRollBonus = result.attack.bonus
       }
       damageRollTotal = Math.max(0, rawDamage)
-      damageDiceResolved = true
       updateEnemyDamageContext(damageRollTotal)
       await runEnemyStage('damageRolled')
       return damageRollTotal
@@ -4728,10 +4617,8 @@ export default function MapsPage() {
     const syncTargetHp = (charId: string) => {
       const updated = useCharacterStore.getState().characters.find((c) => c.id === charId)
       if (updated) {
-        updateToken(activeMap.id, result.targetTokenId!, {
-          hp: updated.currentHp,
-          maxHp: updated.maxHp,
-        })
+        // [T10/AC1] 经唯一镜像 helper 把 currentHp 写回 token.hp，杜绝任何路径绕过。
+        updateToken(activeMap.id, result.targetTokenId!, characterHpTokenPatch(updated))
         if (updated.currentHp <= 0) {
           deferDeathHandling(result.targetTokenId!, charId)
         }
@@ -4803,7 +4690,6 @@ export default function MapsPage() {
           const diceTotal = values.reduce((sum, value) => sum + value, 0)
           damageRollBonus = result.attack.bonus
           damageRollTotal = Math.max(0, diceTotal + result.attack.bonus)
-          damageDiceResolved = true
           estimatedDamage = Math.max(1, damageRollTotal)
           updateEnemyDamageContext(damageRollTotal)
           await runEnemyStage('damageRolled')
@@ -4909,7 +4795,6 @@ export default function MapsPage() {
             ac: resolved.dodgeRoll.targetAc,
             hit: !resolved.dodged,
             kind: 'dodge',
-            source: 'dice-box',
           }
         }
         if (enemyResolutionSession) {
@@ -5020,12 +4905,8 @@ export default function MapsPage() {
         }))
       }
       await runEnemyStage('damageApplied')
-    } else if (result.targetTokenPatch) {
-      updateToken(activeMap.id, result.targetTokenId, result.targetTokenPatch)
-      if (result.targetTokenPatch.hp != null && result.targetTokenPatch.hp <= 0 && result.targetTokenId) {
-        deferDeathHandling(result.targetTokenId)
-      }
     }
+    // [T7/AC4] 移除死分支：EnemyTurnResult.targetTokenPatch 从无生产者，已连同接口字段删除。
     if (result.attack) {
       const labelParts = [combatLabel, ...enemyFeatureLabels].filter(Boolean)
       const attackLabel = labelParts.length > 0
@@ -5043,7 +4924,6 @@ export default function MapsPage() {
             : undefined,
         targetName: result.attack.targetName,
         d20Roll,
-        diceBoxResolved: damageDiceResolved,
       }
       setRoll(enemyRollForDisplay)
       publishSharedDiceRoll(enemyRollForDisplay)
@@ -5222,8 +5102,14 @@ export default function MapsPage() {
   const scheduleEnemyTurn = async (enemy: Token) => {
     if (!activeMap) return
     const enemyTurnKey = `${round}-${initiativeIndex}-${enemy.id}`
+    // [T2/A7] Capture the round this turn was scheduled in. A long second-strike timer
+    // (DICE_ROLL_MS + 5000) can outlive nextRound(); without this check a stale strike
+    // that fires after the round wrapped to index 0 onto the SAME enemy token would pass
+    // the token-identity check and double-advance. (nextRound() also clears pending timers.)
+    const scheduledRound = roundRef.current
     const isStillEnemyTurn = () => {
       if (!combatActive) return false
+      if (roundRef.current !== scheduledRound) return false
       const current = initiativeOrderRef.current[initiativeIndexRef.current]
       return current?.tokenId === enemy.id
     }
@@ -5246,7 +5132,8 @@ export default function MapsPage() {
       const current = initiativeOrderRef.current[initiativeIndexRef.current]
       if (!current || current.tokenId !== enemy.id) return
       if (!enemyAppliedKeysRef.current.has(enemyTurnKey)) return
-      advanceInitiativeCore()
+      if (roundRef.current !== scheduledRound) return
+      requestAdvance()
     }
     const startingAp = getEnemyApState(enemy.id).current
     if (startingAp <= 0) {
@@ -5255,7 +5142,8 @@ export default function MapsPage() {
       return
     }
     const result = planEnemyTurn(activeMap, enemy, useCharacterStore.getState().characters, startingAp, { round })
-    if (result.newPosition) {
+    if (result.newPosition && !isTokenMovementLocked(enemy)) {
+      // [T4/C4] a restrained/no-move enemy may still attack but cannot reposition.
       if (!isStillEnemyTurn()) return
       const moveApSpent = result.moveApSpent ?? 1
       await resolveOpportunityAttacksForMove(enemy, result.newPosition)
@@ -5263,7 +5151,7 @@ export default function MapsPage() {
       const latestMap = useMapStore.getState().maps.find((m) => m.id === activeMap.id)
       const latestEnemy = latestMap?.tokens.find((t) => t.id === enemy.id) ?? enemy
       if (!isTokenAlive(latestEnemy, useCharacterStore.getState().characters)) {
-        const id = window.setTimeout(advanceEnemyIfCurrent, DICE_ROLL_MS + 200)
+        const id = window.setTimeout(advanceEnemyIfCurrent, ADVANCE_DELAY_MS)
         enemyTurnTimersRef.current.push(id)
         return
       }
@@ -5304,7 +5192,7 @@ export default function MapsPage() {
         if (apLeft > 0 && latestMap && latestEnemy && isTokenAlive(latestEnemy, useCharacterStore.getState().characters)) {
           if (!isStillEnemyTurn()) return
           const nextResult = planEnemyTurn(latestMap, latestEnemy, useCharacterStore.getState().characters, apLeft, { round })
-          if (nextResult.newPosition) {
+          if (nextResult.newPosition && !isTokenMovementLocked(latestEnemy)) {
             pushTimer(async () => {
               if (!isStillEnemyTurn()) return
               const moveApSpent = nextResult.moveApSpent ?? 1
@@ -5317,7 +5205,7 @@ export default function MapsPage() {
               const stillAliveMap = useMapStore.getState().maps.find((m) => m.id === activeMap.id)
               const stillAliveEnemy = stillAliveMap?.tokens.find((t) => t.id === enemy.id) ?? latestEnemy
               if (!isTokenAlive(stillAliveEnemy, useCharacterStore.getState().characters)) {
-                pushTimer(advanceEnemyIfCurrent, DICE_ROLL_MS + 200)
+                pushTimer(advanceEnemyIfCurrent, ADVANCE_DELAY_MS)
                 return
               }
               updateToken(activeMap.id, enemy.id, { x: nextResult.newPosition!.x, y: nextResult.newPosition!.y })
@@ -5346,14 +5234,14 @@ export default function MapsPage() {
                 'turn',
               )
               applyEnemyAttack(nextResult, () => {
-                pushTimer(advanceEnemyIfCurrent, DICE_ROLL_MS + 200)
+                pushTimer(advanceEnemyIfCurrent, ADVANCE_DELAY_MS)
               })
               return
             }, DICE_ROLL_MS + 5000)
             return
           }
         }
-        pushTimer(advanceEnemyIfCurrent, DICE_ROLL_MS + 200)
+        pushTimer(advanceEnemyIfCurrent, ADVANCE_DELAY_MS)
       })
     }
 
@@ -5373,6 +5261,17 @@ export default function MapsPage() {
           ? useCharacterStore.getState().characters.find((c) => c.id === t.characterId)
           : null
         if (ch) charConds = [...ch.conditions]
+
+        // [T3/C1] Damage-over-time: burning/ignite/poison now actually deal HP each round
+        // (the tick previously only decremented counters — three DOT statuses were purely
+        // decorative). DM-only (AC0): computed once on the authority and broadcast via
+        // updateToken; players never tick locally, so no double-application. Applied as the
+        // summed total BEFORE the counter decrements, so a 1-turn DOT still deals its last
+        // tick. raw=true keeps the loss exactly the configured constant.
+        if (isDM) {
+          const dot = dotDamageFor(t)
+          if (dot > 0) void applyDamageToToken(t, dot, { raw: true })
+        }
 
         if (t.burningTurns && t.burningTurns > 0) {
           patch.burningTurns = t.burningTurns - 1
@@ -5476,8 +5375,18 @@ export default function MapsPage() {
     const idx = initiativeIndexRef.current
     const current = order[idx]
     if (!current) {
+      // [T2/A11] Index points past/at a hole. Reset to 0, but if entry 0 already
+      // acted this round (its dedupe key is present), force one guarded advance so
+      // the queue cannot stall at index 0 instead of silently parking.
       setInitiativeIndex(0)
       initiativeIndexRef.current = 0
+      const head = order[0]
+      if (head) {
+        const headKey = `${roundRef.current}-0-${head.tokenId}`
+        if (enemyAppliedKeysRef.current.has(headKey)) {
+          window.setTimeout(() => requestAdvance(), 0)
+        }
+      }
       return
     }
 
@@ -5488,13 +5397,15 @@ export default function MapsPage() {
       const entry = order[next]
       const tok = activeMap?.tokens.find((t) => t.id === entry.tokenId)
       if (!tok) {
-        setInitiativeOrder((o) => {
-          const pruned = pruneInitiativeForToken(o, idx, entry.tokenId)
-          initiativeIndexRef.current = pruned.index
-          initiativeOrderRef.current = pruned.order
-          setInitiativeIndex(pruned.index)
-          return pruned.order
-        })
+        // [T2/A9] Compute the prune first, then write refs + state at top level —
+        // doing ref side-effects INSIDE a setInitiativeOrder updater double-fires
+        // under React18/StrictMode and desyncs initiativeIndexRef from state.
+        const pruned = pruneInitiativeForToken(initiativeOrderRef.current, idx, entry.tokenId)
+        initiativeIndexRef.current = pruned.index
+        initiativeOrderRef.current = pruned.order
+        setInitiativeOrder(pruned.order)
+        setInitiativeIndex(pruned.index)
+        // recursive continuation of the in-progress advance (exempt from the guard)
         window.setTimeout(() => advanceInitiativeCore(), 0)
         return
       }
@@ -5525,14 +5436,28 @@ export default function MapsPage() {
     }
   }
 
-  const advanceInitiative = () => {
-    if (isEnemyTurn) return
+  // [T2/A10/A12] Single reentrancy-guarded entry point for ALL automatic advances
+  // (death-skip effects, prune timers, enemy-turn completion, npc auto-skip in T1).
+  // Previously advancingTurnRef only protected the manual wrapper below, so a manual
+  // advance racing a timer — or two death-skip effects — could run advanceInitiativeCore
+  // concurrently and skip/repeat a turn. Two advances within ADVANCE_GUARD_MS now collapse
+  // to one. The recursive prune-continuation in advanceInitiativeCore calls Core directly
+  // (it is the continuation of an advance already holding the guard), and is exempt.
+  const requestAdvance = () => {
     if (advancingTurnRef.current) return
     advancingTurnRef.current = true
-    advanceInitiativeCore()
-    window.setTimeout(() => {
-      advancingTurnRef.current = false
-    }, 350)
+    try {
+      advanceInitiativeCore()
+    } finally {
+      window.setTimeout(() => {
+        advancingTurnRef.current = false
+      }, ADVANCE_GUARD_MS)
+    }
+  }
+
+  const advanceInitiative = () => {
+    if (isEnemyTurn) return
+    requestAdvance()
   }
 
   const acknowledgePlayerAction = (
@@ -5798,8 +5723,8 @@ export default function MapsPage() {
         completePlayerActionRequest(action)
         return
       }
-      if (actor.conditions.includes(NO_MOVE_STATUS_LABEL)) {
-        acknowledgePlayerAction(action, 'rejected', 'no-move')
+      if (isMovementLocked(actor.conditions)) {
+        acknowledgePlayerAction(action, 'rejected', 'no-move') // [T4/C4/C8] no-move OR restrained
         completePlayerActionRequest(action)
         return
       }
@@ -6125,27 +6050,66 @@ export default function MapsPage() {
 
     const entry = initiativeOrder[initiativeIndex]
     if (!entry) {
-      advanceInitiativeCore()
+      requestAdvance()
       return
     }
 
     const token = activeMap.tokens.find((t) => t.id === entry.tokenId)
     const chars = useCharacterStore.getState().characters
 
-    if (!token) {
-      setInitiativeOrder((order) => {
-        const pruned = pruneInitiativeForToken(order, initiativeIndexRef.current, entry.tokenId)
-        initiativeIndexRef.current = pruned.index
-        initiativeOrderRef.current = pruned.order
-        setInitiativeIndex(pruned.index)
-        return pruned.order
-      })
-      const timer = window.setTimeout(() => advanceInitiativeCore(), 50)
+    // [T1/T3 · T13] 槽位决策抽到纯函数 decideTurnAction（prune/skip/enemy/player）。effect 这里
+    // 只保留各分支的「副作用」（prune 重排、去重 key、眩晕日志、全 npc parked 守卫、定时推进）。
+    // 决策本身与 decideTurnAction 一致，便于 T13 在不挂载组件下单测。
+    const action = decideTurnAction(token, chars)
+
+    if (action === 'prune') {
+      // [T2/A9] prune at top level, not inside the updater (StrictMode double-fire)
+      const pruned = pruneInitiativeForToken(initiativeOrderRef.current, initiativeIndexRef.current, entry.tokenId)
+      initiativeIndexRef.current = pruned.index
+      initiativeOrderRef.current = pruned.order
+      setInitiativeOrder(pruned.order)
+      setInitiativeIndex(pruned.index)
+      const timer = window.setTimeout(() => requestAdvance(), 50)
       return () => window.clearTimeout(timer)
     }
 
-    if (!isTokenAlive(token, chars)) {
-      const timer = window.setTimeout(() => advanceInitiativeCore(), 50)
+    // 'skip' 合并三类：死亡 / 眩晕 / 存活非行动者。各自副作用保持独立（与原三分支逐字节一致）。
+    if (action === 'skip') {
+      // token 此处必非空（decideTurnAction 仅在 token 缺失时返回 'prune'）。
+      const skipToken = token!
+      // 死亡 token：直接定时推进（无去重 key，与原死亡分支一致）。
+      if (!isTokenAlive(skipToken, chars)) {
+        const timer = window.setTimeout(() => requestAdvance(), 50)
+        return () => window.clearTimeout(timer)
+      }
+
+      // [T3/C2] Stunned unit (player OR enemy) skips its entire turn. Previously stunTurns
+      // was applied/decremented/VFX'd but never checked here or in planEnemyTurn, so a
+      // stunned unit acted normally. Skipping here (before the enemy-schedule / player-begin
+      // branches) advances past it; the decrement at round-end (counter -1) restores it next
+      // round (AC5: stunTurns>0 => skip, ==0 => normal turn).
+      if ((skipToken.stunTurns ?? 0) > 0) {
+        const stunKey = `stun-${round}-${initiativeIndex}-${skipToken.id}`
+        if (stunSkippedKeysRef.current.has(stunKey)) return
+        stunSkippedKeysRef.current.add(stunKey)
+        pushCombatLog(`${skipToken.label} 处于眩晕状态，跳过本回合。`, 'turn')
+        const timer = window.setTimeout(() => requestAdvance(), 50)
+        return () => window.clearTimeout(timer)
+      }
+
+      // [T1/A1/A2/BUG③] Live non-actor (npc/obstacle) in the initiative slot. There is
+      // no enemy/player branch for it, so the round used to hang here: the player "结束回合"
+      // button is disabled on a non-player turn (canControlPlayerTurn=false) -> the player
+      // side was UNRECOVERABLY deadlocked; only the DM clicking "下一位" escaped. Auto-skip
+      // DM-side; the advance is DM-authored and broadcast via the combat snapshot, so the
+      // player advances too. The dedupe key prevents stacking skip timers across re-renders.
+      // AC4: never spin on an all-npc queue. If no alive player/enemy actor exists at
+      // all, park the round instead of advancing forever (each round mints new keys).
+      if (!hasActionableActor(initiativeOrder, activeMap.tokens, chars)) return
+      const skipKey = `nonactor-${round}-${initiativeIndex}-${skipToken.id}`
+      if (nonActorSkippedKeysRef.current.has(skipKey)) return
+      nonActorSkippedKeysRef.current.add(skipKey)
+      const timer = window.setTimeout(() => requestAdvance(), 50)
       return () => window.clearTimeout(timer)
     }
 
@@ -6194,7 +6158,7 @@ export default function MapsPage() {
     if (!isDM) return
     if (tryEndCombatIfNeeded()) return
     if (!isTokenAlive(currentInitiativeToken, characters)) {
-      const timer = window.setTimeout(() => advanceInitiativeCore(), 50)
+      const timer = window.setTimeout(() => requestAdvance(), 50)
       return () => window.clearTimeout(timer)
     }
   }, [combatActive, activeMap?.id, currentInitiativeToken?.id, characters, defeatedTokenIds.length, isDM])

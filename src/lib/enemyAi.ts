@@ -1,12 +1,11 @@
 import type { BattleMap, Token } from '../store/maps'
 import type { Character } from '../types/character'
 import { abilityMod } from './dnd'
-import { enemyCombatInput } from './enemyCombatStats'
-import { getEnemyStatBlock } from './enemyStatBlocks'
+import { getEnemyStatBlock, getPrimaryAttackAction, type MonsterAction } from './enemyStatBlocks'
 import {
   cellDistance,
   cellToPixel,
-  isPlayerToken,
+  isHostileToEnemy,
   occupiedCells,
   pixelToCell,
   stepToward,
@@ -15,7 +14,30 @@ import {
 
 const MOVE_CELLS_PER_TURN = 6
 const MELEE_RANGE_CELLS = 1
-const ATTACK_DICE = { count: 1, sides: 6 }
+/** 无结构化攻击数据时的回退骰（理论上 post-T6 不应触发） */
+const FALLBACK_ATTACK_DICE = { count: 1, sides: 6 }
+
+/** [T7/AC1] 解析 'XdY+Z' / 'XdY' 形式的伤害骰；解析失败回退到 1d6。 */
+function parseDamageDice(dice: string | undefined): { count: number; sides: number; bonus: number } {
+  const match = dice?.match(/^(\d+)d(\d+)([+-]\d+)?$/i)
+  if (!match) return { count: FALLBACK_ATTACK_DICE.count, sides: FALLBACK_ATTACK_DICE.sides, bonus: 0 }
+  return {
+    count: Math.max(1, Number(match[1])),
+    sides: Math.max(2, Number(match[2])),
+    bonus: match[3] ? Number(match[3]) : 0,
+  }
+}
+
+/**
+ * [T7/AC6] stale/unknown poolId 回退到固定 dexBonus 时，按 token id 去重告警一次。
+ * 战斗结束时由 clearEnemyAiWarnings() 清空，避免长时间运行无界增长。
+ */
+const warnedFallbackTokenIds = new Set<string>()
+
+/** [T7/AC6] 战斗结束生命周期钩子：清空回退告警去重集合。 */
+export function clearEnemyAiWarnings(): void {
+  warnedFallbackTokenIds.clear()
+}
 
 export interface EnemyAttackRoll {
   values: number[]
@@ -38,8 +60,6 @@ export interface EnemyTurnResult {
   damageType?: 'physical' | 'aoe'
   /** 范围法术敏捷豁免 DC */
   saveDC?: number
-  /** 对 token 自身 HP 的补丁 */
-  targetTokenPatch?: Partial<Token>
   /** 对关联角色的伤害 */
   targetCharacterId?: string
   damage?: number
@@ -50,6 +70,14 @@ function enemyMeleeDexBonus(enemy: Token): number {
   if (enemy.poolId) {
     const stats = getEnemyStatBlock(enemy.poolId)
     if (stats) return abilityMod(stats.abilities.dex)
+  }
+  // [T7/AC6] 缺失/陈旧 poolId → 固定回退 dexBonus=2，按 token id 去重告警一次。
+  if (!warnedFallbackTokenIds.has(enemy.id)) {
+    warnedFallbackTokenIds.add(enemy.id)
+    console.warn(
+      `[enemyAi] token ${enemy.id}（poolId=${enemy.poolId ?? '无'}）缺少有效 stat block，` +
+        `回退到固定近战敏捷加值 2。`,
+    )
   }
   return 2
 }
@@ -108,6 +136,23 @@ function enemyRangedRangeCells(enemy: Token, map: BattleMap): number | null {
   return Math.max(1, Math.floor(feet / feetPerCell))
 }
 
+/**
+ * [T7/AC1] 选取本次攻击使用的结构化动作：
+ * 远程优先含 damageDice 的远程动作；近战走主攻击（getPrimaryAttackAction）。
+ * 缺失时回退到主攻击。多重攻击的怪物只取主攻击（一次），见 Edge Cases。
+ */
+function selectAttackAction(
+  block: ReturnType<typeof getEnemyStatBlock>,
+  kind: 'melee' | 'ranged',
+): MonsterAction | undefined {
+  if (!block) return undefined
+  if (kind === 'ranged') {
+    const ranged = block.actions.find((a) => a.kind === 'ranged' && !!a.damageDice)
+    if (ranged) return ranged
+  }
+  return getPrimaryAttackAction(block)
+}
+
 function buildEnemyAttack(
   enemy: Token,
   target: Token,
@@ -117,18 +162,29 @@ function buildEnemyAttack(
 ): EnemyTurnResult {
   const values: number[] = []
   const total = 1
+
+  // [T7/AC1] 标签/骰面/命中加值来自怪物的结构化主攻击（damageDice/damageType/toHit），
+  // 不再硬编码全局 1d6。inferEnemyDamageDiceCount 会从 label 解析 \d+d\d+。
+  const block = enemy.poolId ? getEnemyStatBlock(enemy.poolId) : undefined
+  const action = selectAttackAction(block, kind)
+  let sides: number
   let diceLabel: string
   let attackBonus: number
 
-  const derived = enemy.poolId ? enemyCombatInput(enemy.poolId) : undefined
-  if (derived) {
-    attackBonus = 0
-    diceLabel = `${ATTACK_DICE.count}d${ATTACK_DICE.sides}`
+  if (action?.damageDice) {
+    const parsed = parseDamageDice(action.damageDice)
+    sides = parsed.sides
+    attackBonus = parsed.bonus
+    diceLabel = action.damageDice
   } else {
+    // 无结构化攻击数据（理论上 post-T6 不应发生）→ 回退骰 + 敏捷加值（AC6 告警在此路径）。
     const dexBonus = enemyMeleeDexBonus(enemy)
+    sides = FALLBACK_ATTACK_DICE.sides
     attackBonus = dexBonus
-    diceLabel = `${ATTACK_DICE.count}d${ATTACK_DICE.sides}${dexBonus >= 0 ? '+' : ''}${dexBonus}`
+    diceLabel = `${FALLBACK_ATTACK_DICE.count}d${FALLBACK_ATTACK_DICE.sides}${dexBonus >= 0 ? '+' : ''}${dexBonus}`
   }
+
+  const attackName = action?.name ?? (kind === 'ranged' ? '远程' : '近战')
   const targetCharacterId = resolveTokenCharacterId(target)
 
   const result: EnemyTurnResult = {
@@ -140,10 +196,10 @@ function buildEnemyAttack(
     targetTokenId: target.id,
     attack: {
       values,
-      sides: ATTACK_DICE.sides,
+      sides,
       bonus: attackBonus,
       total,
-      label: `${kind === 'ranged' ? '远程' : '近战'} ${diceLabel}`,
+      label: `${kind === 'ranged' ? '远程' : '近战'}·${attackName} ${diceLabel}`,
       targetName: target.label,
     },
     damage: total,
@@ -157,6 +213,48 @@ function buildEnemyAttack(
   return result
 }
 
+/**
+ * [T7/AC3] 数据驱动的吐息分支：任何怪物只要其 stat block 含一个
+ * `kind:'aoe'` 且带 `save` 的结构化动作，就在第一回合默认使用该吐息，
+ * 不再针对 'wyrmling-red' 做字符串特判。红/绿龙皆由数据驱动。
+ */
+function buildBreathAttack(
+  enemy: Token,
+  target: Token,
+  breath: MonsterAction,
+): EnemyTurnResult {
+  const parsed = parseDamageDice(breath.damageDice)
+  // 估算伤害（满额 = count*sides）；MapsPage 会按 label 重新投骰，total 仅作占位。
+  const estimate = parsed.count * parsed.sides + parsed.bonus
+  const dc = breath.save?.dc ?? 12
+  return {
+    moved: false,
+    attacked: true,
+    attackerTokenId: enemy.id,
+    targetTokenId: target.id,
+    damageType: 'aoe',
+    saveDC: dc,
+    attack: {
+      values: [],
+      sides: parsed.sides,
+      bonus: parsed.bonus,
+      total: estimate,
+      label: `${breath.name} ${breath.damageDice ?? ''}（豁免成功半伤）`.trim(),
+      targetName: target.label,
+    },
+    damage: estimate,
+    targetCharacterId: resolveTokenCharacterId(target),
+    message: `${enemy.label} 使用${breath.name}，${target.label} 进行 DC${dc} 豁免。`,
+  }
+}
+
+/** [T7/AC3] 取怪物的吐息动作（kind:'aoe' 且带 save）。 */
+function findBreathAction(enemy: Token): MonsterAction | undefined {
+  if (!enemy.poolId) return undefined
+  const block = getEnemyStatBlock(enemy.poolId)
+  return block?.actions.find((a) => a.kind === 'aoe' && !!a.save)
+}
+
 export function planEnemyTurn(
   map: BattleMap,
   enemy: Token,
@@ -164,34 +262,19 @@ export function planEnemyTurn(
   availableAp = 2,
   context?: { round?: number },
 ): EnemyTurnResult {
-  const players = map.tokens.filter(isPlayerToken)
-  if (players.length === 0) {
-    return { moved: false, attacked: false, message: `${enemy.label} 找不到玩家 token。` }
+  // [T7/AC2] 目标集合 = 玩家 + npc/友方（敌对于敌人），排除 enemy-vs-enemy 与障碍。
+  const targets = map.tokens.filter(isHostileToEnemy)
+  if (targets.length === 0) {
+    return { moved: false, attacked: false, message: `${enemy.label} 找不到可攻击目标。` }
   }
 
   const startCell = pixelToCell(enemy.x, enemy.y, map)
-  const nearest = findNearestPlayer(startCell, players, map)!
+  const nearest = findNearestPlayer(startCell, targets, map)!
   const rangedRangeCells = enemyRangedRangeCells(enemy, map)
-  if (enemy.poolId === 'wyrmling-red' && (context?.round ?? 1) === 1 && availableAp >= 1) {
-    return {
-      moved: false,
-      attacked: true,
-      attackerTokenId: enemy.id,
-      targetTokenId: nearest.token.id,
-      damageType: 'aoe',
-      saveDC: 12,
-      attack: {
-        values: [],
-        sides: 6,
-        bonus: 0,
-        total: 24,
-        label: '火焰吐息 4d6（敏捷豁免成功半伤）',
-        targetName: nearest.token.label,
-      },
-      damage: 24,
-      targetCharacterId: resolveTokenCharacterId(nearest.token),
-      message: `${enemy.label} 使用火焰吐息，${nearest.token.label} 进行 DC12 敏捷豁免。`,
-    }
+  // [T7/AC3] 数据驱动吐息：第一回合默认优先使用（红/绿龙等）。
+  const breath = findBreathAction(enemy)
+  if (breath && (context?.round ?? 1) === 1 && availableAp >= 1) {
+    return buildBreathAttack(enemy, nearest.token, breath)
   }
   let endCell = startCell
 

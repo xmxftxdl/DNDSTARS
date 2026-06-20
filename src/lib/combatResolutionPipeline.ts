@@ -172,8 +172,11 @@ export class CombatResolutionSession {
   readonly mutations: CombatMutation[] = []
   readonly interrupts: CombatInterruptRequest[] = []
   readonly onceKeys = new Set<string>()
+  readonly context: CombatResolutionContext
 
-  constructor(readonly context: CombatResolutionContext) {}
+  constructor(context: CombatResolutionContext) {
+    this.context = context
+  }
 
   result(): CombatResolutionResult {
     return {

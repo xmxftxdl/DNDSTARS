@@ -5,7 +5,6 @@ import { DND_FEET_PER_CELL } from './gridCombat'
 import {
   findClassTrait,
   getClassFeatureDef,
-  isBasicShot,
   isSingleArrowSkill,
   pixelToCell,
   eagleEyeDexBonus,
@@ -38,9 +37,13 @@ export interface RangedAttackOptions {
   advantage?: boolean
   disadvantage?: boolean
   critThreshold?: number
-  d20?: number
+  // [T12/F4] d20 / d20Second / damageValues 由调用方（MapsPage 的 dice-box 抽样）
+  // 权威供给——显示值与结算值同源。原先的 `?? rollD20()` / `?? Array.from(Math.random())`
+  // 回退在该路径下从不执行（死代码），且会引入「显示≠结算」的第二个 RNG，故移除：
+  // d20 与 damageValues 改为必填，d20Second 在优势时由调用方供给。
+  d20: number
   d20Second?: number
-  damageValues?: number[]
+  damageValues: number[]
   /** 精准打击：本次攻击必定重击 */
   forceCrit?: boolean
   /** 攻击属性（默认敏捷） */
@@ -111,14 +114,14 @@ export function resolveRangedAttackRoll(
   skill: CombatSkill,
   targetAc: number,
   doubleArrow: boolean,
-  opts: RangedAttackOptions = {},
+  opts: RangedAttackOptions,
 ): RangedAttackResult {
   const diceCount = attackDamageDiceCount(skill, doubleArrow)
   const attackBonus = rangedAttackBonus(caster, skill, opts.ability ?? 'dex')
 
-  const d20a = opts.d20 ?? rollD20()
-  const hasAdvantage = !!opts.advantage && !opts.disadvantage
-  const d20b = opts.d20Second ?? (hasAdvantage ? rollD20() : undefined)
+  // [T12/F4] d20 / d20Second 由调用方权威供给——不再回退到本地 rollD20()。
+  const d20a = opts.d20
+  const d20b = opts.d20Second
   const d20 = d20b != null ? Math.max(d20a, d20b) : d20a
 
   const attackTotal = d20 + attackBonus
@@ -127,11 +130,8 @@ export function resolveRangedAttackRoll(
   const isCrit = opts.forceCrit || d20 >= critThreshold
   const hit = opts.forceCrit || isCrit || attackTotal >= targetAc
 
-  const damageSides = isBasicShot(skill) ? 8 : skill.damageSides
-  const damageValues = hit
-    ? (opts.damageValues?.slice(0, diceCount) ??
-      Array.from({ length: diceCount }, () => 1 + Math.floor(Math.random() * damageSides)))
-    : []
+  // [T12/F4] 伤害骰值由调用方权威供给——不再回退到本地 Math.random()。
+  const damageValues = hit ? opts.damageValues.slice(0, diceCount) : []
   let damageTotal = 0
   if (hit) {
     damageTotal = resolveAttackDamageTotal(caster, skill, damageValues, {
@@ -156,10 +156,11 @@ export function resolveRangedAttackRoll(
 export function resolveDexSaveDamage(
   target: Character,
   fullDamage: number,
-  dc = 14,
-  providedD20?: number,
+  dc: number,
+  // [T12/F4] 豁免 d20 由调用方（dice-box 抽样）权威供给——移除 `?? rollD20()` 回退。
+  providedD20: number,
 ): { saveD20: number; saveMod: number; saveTotal: number; dc: number; success: boolean; damage: number } {
-  const saveD20 = providedD20 ?? rollD20()
+  const saveD20 = providedD20
   const saveMod = getEffectiveAbilityMod(target, 'dex')
   const saveTotal = saveD20 + saveMod
   const success = saveTotal >= dc

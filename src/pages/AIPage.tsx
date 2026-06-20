@@ -11,7 +11,7 @@ import {
   type MapSimulationDetailedResult,
   type SimulationSummary,
 } from '../lib/aiPolicy'
-import { characterToCombatInput, computeAc, computePhysicalAttack } from '../lib/combatStats'
+import { characterToCombatInput, computeAc, computePhysicalAttack, DEFAULT_ENEMY_AC } from '../lib/combatStats'
 import { getEnemyAc, getEnemyMaxHp, enemyCombatInput } from '../lib/enemyCombatStats'
 import { getEnemyStatBlock } from '../lib/enemyStatBlocks'
 import { abilityMod, proficiencyBonus } from '../lib/dnd'
@@ -157,7 +157,7 @@ export default function AIPage() {
           y: cell.row,
           hp: Math.max(0, token.hp ?? (token.poolId ? getEnemyMaxHp(token.poolId) : 12)),
           maxHp: Math.max(1, token.maxHp ?? token.hp ?? (token.poolId ? getEnemyMaxHp(token.poolId) : 12)),
-          ac: token.poolId ? getEnemyAc(token.poolId) : 12,
+          ac: token.poolId ? getEnemyAc(token.poolId) : DEFAULT_ENEMY_AC,
           attackBonus: attackScore + 2,
           damageDice: { count: 1, sides: 6, bonus: Math.max(1, Math.round(physicalAttack / 20)) },
           speedCells: Math.max(1, Math.floor(speedFeet / DND_FEET_PER_CELL)),

@@ -1,18 +1,9 @@
 import { useEffect, useId, useMemo, useRef } from 'react'
 import type { CSSProperties } from 'react'
+// [T12/F3] FLY_OFFSETS / stableIndex / 握手 / 时序常量收口到共享模块。
+import { DICE_TIMING, parseDiceBoxMessage, resolveFlyOffset } from '../lib/diceOverlayShared'
 
-const FLY_OFFSETS = [
-  ['-340px', '-120px'],
-  ['340px', '-120px'],
-  ['-360px', '80px'],
-  ['360px', '80px'],
-  ['-120px', '-260px'],
-  ['120px', '-260px'],
-  ['-220px', '240px'],
-  ['220px', '240px'],
-] as const
-
-const MIN_VISIBLE_ROLL_MS = 2600
+const MIN_VISIBLE_ROLL_MS = DICE_TIMING.ROLL_MIN_VISIBLE_MS
 
 interface DiceBoxRollOverlayProps {
   count: number
@@ -29,15 +20,6 @@ interface DiceBoxRollOverlayProps {
 
 function fallbackValues(count: number, sides: number) {
   return Array.from({ length: count }, () => 1 + Math.floor(Math.random() * sides))
-}
-
-function stableIndex(seed: string, length: number) {
-  let hash = 2166136261
-  for (let i = 0; i < seed.length; i += 1) {
-    hash ^= seed.charCodeAt(i)
-    hash = Math.imul(hash, 16777619)
-  }
-  return (hash >>> 0) % Math.max(1, length)
 }
 
 export default function DiceBoxRollOverlay({
@@ -64,10 +46,7 @@ export default function DiceBoxRollOverlay({
   const readyRef = useRef(false)
   const completedRef = useRef(false)
   const onCompleteRef = useRef(onComplete)
-  const [flyX, flyY] = useMemo(
-    () => FLY_OFFSETS[flyIndex == null ? stableIndex(requestId, FLY_OFFSETS.length) : Math.abs(Math.round(flyIndex)) % FLY_OFFSETS.length],
-    [flyIndex, requestId],
-  )
+  const [flyX, flyY] = useMemo(() => resolveFlyOffset(requestId, flyIndex), [flyIndex, requestId])
 
   useEffect(() => {
     onCompleteRef.current = onComplete
@@ -118,17 +97,8 @@ export default function DiceBoxRollOverlay({
       )
     }
     const handleMessage = (event: MessageEvent) => {
-      if (event.origin !== window.location.origin) return
-      const data = event.data as {
-        type?: string
-        requestId?: string
-        values?: unknown
-        stage?: string
-      } | undefined
-      if (data?.type === 'dice-box-debug') {
-        console.info('[dice-box-debug]', data)
-        return
-      }
+      const data = parseDiceBoxMessage(event)
+      if (!data) return
       if (data?.type === 'dice-box-ready' && !readyRef.current) {
         readyRef.current = true
         log('iframe-ready')

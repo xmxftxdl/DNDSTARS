@@ -1,4 +1,6 @@
 import { useEffect, useRef } from 'react'
+// [T12/F2] HUD 自关闭时间纳入共享时序契约（结算窗口的一部分）。
+import { DICE_TIMING } from '../lib/diceOverlayShared'
 
 export interface D20AttackRoll {
   value: number
@@ -8,7 +10,6 @@ export interface D20AttackRoll {
   isCrit?: boolean
   /** attack: 命中判定；save: 豁免判定；dodge: 闪避判定 */
   kind?: 'attack' | 'dodge' | 'save'
-  source?: 'dice-box'
 }
 
 export interface DiceRoll {
@@ -19,7 +20,6 @@ export interface DiceRoll {
   label: string
   formula?: string
   targetName: string
-  diceBoxResolved?: boolean
   /** 命中检定 d20（攻击/豁免等） */
   d20Roll?: D20AttackRoll
 }
@@ -46,7 +46,7 @@ export default function DiceRollOverlay({ roll, onDone }: { roll: DiceRoll; onDo
   const d20 = roll.d20Roll
 
   useEffect(() => {
-    const timer = window.setTimeout(() => onDoneRef.current(), 4000)
+    const timer = window.setTimeout(() => onDoneRef.current(), DICE_TIMING.HUD_MS)
     return () => window.clearTimeout(timer)
   }, [roll])
 

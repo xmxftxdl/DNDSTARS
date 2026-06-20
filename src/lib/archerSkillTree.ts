@@ -728,7 +728,7 @@ const SKILL_DISPLAY_META: Record<string, SkillDisplayMeta> = {
     range: '30 尺',
     target: (rank) => (rank >= 4 ? '至多三名敌人' : '至多两名敌人'),
     damageType: '无属性',
-    damage: (rank, tier) => `每支箭 ${formatSkillDamage(tier)} 点无属性伤害`,
+    damage: (_rank, tier) => `每支箭 ${formatSkillDamage(tier)} 点无属性伤害`,
     effect: (rank) => (rank >= 4 ? '射出三支箭矢，可分别选择目标。' : '射出两支箭矢，可分别选择目标。'),
   },
   whirlwindKick: {
@@ -846,7 +846,7 @@ const SKILL_DISPLAY_META: Record<string, SkillDisplayMeta> = {
     range: '原地',
     target: '箭矢指定目标',
     damageType: '穿刺',
-    damage: (rank, tier) => `每支箭 ${formatSkillDamage(tier)} 点穿刺伤害`,
+    damage: (_rank, tier) => `每支箭 ${formatSkillDamage(tier)} 点穿刺伤害`,
     save: (rank) => (rank >= 5 ? '体质豁免' : undefined),
     effect: (rank) => {
       if (rank >= 5) return '射出 5 支箭；全部射向同一目标时，目标豁免失败则眩晕 1 回合。'

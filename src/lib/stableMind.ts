@@ -69,7 +69,8 @@ export function resolveIncomingDexSaveDamage(
   fullDamage: number,
   dc: number,
   onStableMindSpend: () => boolean,
-  providedD20?: number,
+  // [T12/F4] 豁免 d20 由调用方权威供给（与 resolveDexSaveDamage 一致）。
+  providedD20: number,
 ): IncomingDexSaveDamage {
   const save = resolveDexSaveDamage(character, fullDamage, dc, providedD20)
   const stable = applyStableMindAfterDexSave(

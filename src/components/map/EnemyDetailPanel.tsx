@@ -250,6 +250,29 @@ export default function EnemyDetailPanel({
               </section>
             )}
 
+            {/* [T6/B1] 主攻击命中 + 伤害：对所有怪物渲染（含 ogre/owlbear 等无装备怪）。 */}
+            {derived?.damageDice && (
+              <section className="mb-4">
+                <h3 className="mb-2 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-slate-500">
+                  <Swords className="h-3.5 w-3.5" />
+                  主攻击
+                </h3>
+                <div className="flex flex-wrap items-center gap-2 rounded-xl bg-rose-500/10 px-3 py-2">
+                  {derived.attackName && (
+                    <span className="text-sm font-medium text-rose-200">{derived.attackName}</span>
+                  )}
+                  {derived.toHit != null && (
+                    <span className="rounded bg-white/5 px-1.5 py-0.5 text-xs tabular-nums text-slate-200">
+                      命中 {derived.toHit >= 0 ? `+${derived.toHit}` : derived.toHit}
+                    </span>
+                  )}
+                  <span className="rounded bg-white/5 px-1.5 py-0.5 text-xs tabular-nums text-slate-200">
+                    伤害 {derived.damageDice}
+                  </span>
+                </div>
+              </section>
+            )}
+
             {token.poolId && getEnemyEquipmentSlots(token.poolId).some((s) => s.name) && (
               <section className="mb-4">
                 <h3 className="mb-2 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-slate-500">
@@ -394,6 +417,23 @@ export default function EnemyDetailPanel({
         {(token.stunTurns ?? 0) > 0 && (
           <p className="mt-2 rounded-lg bg-yellow-500/15 px-2 py-1 text-xs text-yellow-200">
             ★ 眩晕 {token.stunTurns} 回合
+          </p>
+        )}
+        {/* [T4/C5] restrained/vulnerable/no-move were authoritative on the token but never
+            shown in the enemy panel — display them from the same *Turns source (no drift). */}
+        {(token.restrainedTurns ?? 0) > 0 && (
+          <p className="mt-2 rounded-lg bg-orange-500/15 px-2 py-1 text-xs text-orange-200">
+            🕸 束缚 {token.restrainedTurns} 回合
+          </p>
+        )}
+        {(token.vulnerableTurns ?? 0) > 0 && (
+          <p className="mt-2 rounded-lg bg-rose-500/15 px-2 py-1 text-xs text-rose-200">
+            💔 脆弱 {token.vulnerableTurns} 回合
+          </p>
+        )}
+        {(token.noMoveTurns ?? 0) > 0 && (
+          <p className="mt-2 rounded-lg bg-slate-500/15 px-2 py-1 text-xs text-slate-200">
+            ⛓ 无法移动 {token.noMoveTurns} 回合
           </p>
         )}
       </div>

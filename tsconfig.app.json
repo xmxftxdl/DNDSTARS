@@ -15,6 +15,18 @@
     "noEmit": true,
     "jsx": "react-jsx",
 
+    /* Strict (phased — G1 / T14): strictNullChecks ONLY this round.
+       Deferred strict sub-flags (NOT enabled — see STRICT_NULL_CHECKS.md):
+         - strict (the umbrella) — OFF; would pull in all sub-flags below at once.
+         - noImplicitAny — OFF; the codebase has many implicit-any params/locals
+           whose annotation is a separate, larger mechanical pass (own task).
+         - strictFunctionTypes / strictBindCallApply / strictPropertyInitialization /
+           alwaysStrict / useUnknownInCatchVariables — OFF; folded into the future
+           full-`strict` flip once strictNullChecks has stabilized.
+       strictNullChecks is the audit's named root cause (G1) and the highest-value
+       sub-flag, so it is enabled first and in isolation. */
+    "strictNullChecks": true,
+
     /* Linting */
     "noUnusedLocals": true,
     "noUnusedParameters": true,

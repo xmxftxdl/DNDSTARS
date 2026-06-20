@@ -245,6 +245,33 @@ export function occupiedCells(tokens: Token[], map: BattleMap, excludeTokenId: s
   return set
 }
 
+/**
+ * [T8/AC3 · D3] 解析放置目标格：若落点格已被其它 token 占用，则向外按环形搜索最近的空格。
+ * 允许 token 停留在自己原本的格子（movingTokenId 排除自身）。找不到空格则回退到原始 snap 坐标。
+ * 两个 token 不能共享同一格心。
+ */
+export function resolveFreeDropCell(
+  snapX: number,
+  snapY: number,
+  movingTokenId: string,
+  map: BattleMap,
+): { x: number; y: number } {
+  const blocked = occupiedCells(map.tokens, map, movingTokenId)
+  const target = pixelToCell(snapX, snapY, map)
+  if (!blocked.has(cellKey(target))) return cellToPixel(target, map)
+  // 环形扩散搜索最近空格（切比雪夫距离逐环外扩）
+  for (let ring = 1; ring <= 8; ring++) {
+    for (let dc = -ring; dc <= ring; dc++) {
+      for (let dr = -ring; dr <= ring; dr++) {
+        if (Math.max(Math.abs(dc), Math.abs(dr)) !== ring) continue
+        const cand: GridCell = { col: target.col + dc, row: target.row + dr }
+        if (!blocked.has(cellKey(cand))) return cellToPixel(cand, map)
+      }
+    }
+  }
+  return cellToPixel(target, map)
+}
+
 /** 向目标靠近一格（斜向一步） */
 export function stepToward(from: GridCell, to: GridCell): GridCell {
   let { col, row } = from
@@ -257,4 +284,12 @@ export function stepToward(from: GridCell, to: GridCell): GridCell {
 
 export function isPlayerToken(t: Token): boolean {
   return t.type === 'player'
+}
+
+/**
+ * [T7/AC2] 敌人 AI 的「敌对目标」集合：玩家 + npc/友方。
+ * 排除 enemy（不打自己人）与 obstacle（障碍物）。仅有 npc 友方的遭遇不再 no-op。
+ */
+export function isHostileToEnemy(t: Token): boolean {
+  return t.type === 'player' || t.type === 'npc'
 }

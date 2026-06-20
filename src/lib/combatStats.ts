@@ -12,6 +12,13 @@ import {
 } from './equipmentDefaults'
 import { isArcherLineClass } from './archerSkillTree'
 
+/**
+ * [T7/AC5/B8] 敌人 AC 缺省值的唯一真相源。
+ * 此前分散在 enemyCombatStats(??12)/combatStats(??10)/AIPage(12) 三处取值不一，
+ * 现统一为本常量，调和为 12。（EnemyDetailPanel 的 ??20 是 maxHp 回退，非 AC，不在此列。）
+ */
+export const DEFAULT_ENEMY_AC = 12
+
 /** 角色 / 敌人共用的战斗数值输入 */
 export interface CombatStatInput {
   abilities: Abilities
@@ -97,7 +104,7 @@ function sumWeaponBonuses(equipment?: CharacterEquipment): Pick<EquipmentBonuses
 export function computeAc(input: CombatStatInput): number {
   const equip = sumEquipmentBonuses(input.equipment)
   if (equip.ac > 0) return equip.ac
-  return input.acFallback ?? 10
+  return input.acFallback ?? DEFAULT_ENEMY_AC
 }
 
 /** 攻击力 = 武器攻击力 + 敏捷 × 2 */
@@ -235,20 +242,27 @@ export interface AttackDefenseDamageAdjust {
   modifier: number
 }
 
-/** 按攻防差值表对伤害加/减值（替代原防御力直减） */
+// [T4/C3] 脆弱：承受伤害 +25%（即「物防/魔防 -25%」承诺的机制实现）。作为攻防修正之后的
+// 最终乘子统一施加，覆盖该函数的所有分支。
+export const VULNERABLE_DAMAGE_MULTIPLIER = 1.25
+
+/** 按攻防差值表对伤害加/减值（替代原防御力直减）。defenderVulnerable=true 时再叠加脆弱乘子。 */
 export function applyAttackDefenseDamageModifier(
   baseDamage: number,
   attacker: CombatStatInput | undefined,
   defender: CombatStatInput | undefined,
   type: DamageReductionType,
+  defenderVulnerable = false,
 ): AttackDefenseDamageAdjust {
+  // defenderVulnerable 默认 false → vulnMult=1 → 对整数伤害逐字节不变（无回归）。
+  const vulnMult = defenderVulnerable ? VULNERABLE_DAMAGE_MULTIPLIER : 1
   if (type === 'true' || baseDamage <= 0 || !attacker || !defender) {
-    return { damage: baseDamage, diff: 0, modifier: 0 }
+    return { damage: Math.max(0, Math.floor(baseDamage * vulnMult)), diff: 0, modifier: 0 }
   }
   const diff = getAttackDefenseDiff(attacker, defender, type)
   const modifier = damageModifierFromAttackDefenseDiff(diff)
   return {
-    damage: Math.max(0, baseDamage + modifier),
+    damage: Math.max(0, Math.floor((baseDamage + modifier) * vulnMult)),
     diff,
     modifier,
   }
