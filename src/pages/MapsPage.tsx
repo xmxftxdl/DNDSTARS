@@ -51,8 +51,6 @@ import DiceRollOverlay from '../components/DiceRollOverlay'
 import type { DiceRoll } from '../components/DiceRollOverlay'
 import DiceBoxD20Overlay from '../components/DiceBoxD20Overlay'
 import DiceBoxRollOverlay from '../components/DiceBoxRollOverlay'
-// [T12/F2] 跨组件时序契约：回合推进延迟由 advanceDelayMs() 派生，保证 ≥ 结算窗口。
-import { advanceDelayMs, RESOLUTION_MS } from '../lib/diceOverlayShared'
 import { useMapStore, characterHpTokenPatch } from '../store/maps'
 import type { Token } from '../store/maps'
 import { useCharacterStore } from '../store/characters'
@@ -114,7 +112,6 @@ import {
   occupiedCells,
   pixelToCell,
   snapToCellCenter,
-  TOKEN_MOVE_DURATION_S,
   type GridCell,
 } from '../lib/gridCombat'
 import {
@@ -144,13 +141,6 @@ import { enemyTemplateToTokenPatch, type EnemyTemplate } from '../lib/enemyPool'
 import { IGNITE_STATUS_LABEL } from '../lib/ignite'
 import { dotDamageFor } from '../lib/statusDamage'
 import {
-  BURNING_STATUS_LABEL as CANON_BURNING_LABEL,
-  POISON_STATUS_LABEL as CANON_POISON_LABEL,
-  RESTRAINED_STATUS_LABEL as CANON_RESTRAINED_LABEL,
-  VULNERABLE_STATUS_LABEL as CANON_VULNERABLE_LABEL,
-  NO_MOVE_STATUS_LABEL as CANON_NO_MOVE_LABEL,
-} from '../lib/tokenStatus'
-import {
   formatKnockbackSaveLabel,
   getTokenAbilityMod,
   KNOCKBACK_DEFAULT_TURNS,
@@ -175,19 +165,44 @@ import {
   PLAYER_ASSIGNMENT_EVENT,
 } from '../lib/playerView'
 import { proficiencyBonus } from '../lib/dnd'
-
-type Mode = 'dm' | 'player'
-
-interface SharedCombatState {
-  mapId: string
-  combatId?: string
-  active: boolean
-  round: number
-  initiativeIndex: number
-  initiativeOrder: InitiativeEntry[]
-  enemyApByToken?: Record<string, { current: number; max: number }>
-  updatedAt: number
-}
+// [T15/G3] god-object 拆分：模块级类型/常量/纯 helper 搬到独立文件，行为不变，原样 import 回来。
+import type {
+  Mode,
+  SharedCombatState,
+  SharedDodgeState,
+  SharedStableMindState,
+  SharedPlayerActionState,
+  SharedPlayerActionAckState,
+  SharedDiceState,
+  SharedDiceEventsState,
+  SharedDiceStreamEvent,
+  SharedDiceStreamPayload,
+  SharedRollRequestEvent,
+  SharedRollRequestPayload,
+  SharedCombatLogState,
+  CombatLogEntry,
+} from './mapsPageTypes'
+import {
+  STATUS_LABEL,
+  RESTRAINED_STATUS_LABEL,
+  VULNERABLE_STATUS_LABEL,
+  NO_MOVE_STATUS_LABEL,
+  TOKEN_MOVE_MS,
+  DICE_ROLL_MS,
+  ADVANCE_DELAY_MS,
+  ADVANCE_GUARD_MS,
+  DEATH_KEY_WATCHDOG_MS,
+} from './mapsPageConstants'
+import {
+  reconcileEnemyAp,
+  singleTargetRangeFeet,
+  statusDuration,
+  buildInitiativeOrder,
+  tokenIntersectsDeleteRect,
+  seededDieValue,
+} from './mapsPageHelpers'
+// [T15/G3] enemyApReconcile.test.ts 从 './MapsPage' 引用 reconcileEnemyAp —— 维持该 re-export。
+export { reconcileEnemyAp }
 
 let lastSharedCombatSnapshot = ''
 // [T11/AC6 · E6] 已应用的 combat 快照单调水位（按 combatId 分段）。
@@ -195,298 +210,6 @@ let lastSharedCombatSnapshot = ''
 let lastAppliedCombatUpdatedAt = 0
 let lastAppliedCombatId = ''
 
-/**
- * [T10/AC4 · E13] enemyAP 的「读到的快照」如何调和进当前态。
- * enemyApByToken 本就是 SharedCombatState 的字段、随 publishCombatState 持久化、loadShared 时 restore —
- * 已是服务端持久化（重连/刷新可恢复已花 AP）。本 helper 只硬化「撕裂读」边界：
- *  - 快照带了 enemyApByToken（即便是 {}）⇒ 这是权威全量，按它来（过滤掉已不存在的 token）。
- *  - 快照里该字段缺失（undefined，撕裂/旧形状）且本端仍持有已花 AP ⇒ 保留本端，不要把已花 AP
- *    冲回空（空会让 tokenHp 显示回落到默认 {2,2}，等于凭空恢复 AP）。
- * 纯函数，便于 T13 在不挂载组件下单测 restore-fires 与 torn-read-preserve 两条路径。
- */
-export function reconcileEnemyAp(
-  incoming: Record<string, { current: number; max: number }> | undefined,
-  existing: Record<string, { current: number; max: number }>,
-  validTokenIds: Set<string>,
-): Record<string, { current: number; max: number }> {
-  // 撕裂读：字段缺失但本端已有已花 AP ⇒ 原样保留（仅过滤无效 token）。
-  if (incoming === undefined && Object.keys(existing).length > 0) {
-    return Object.fromEntries(
-      Object.entries(existing).filter(([tokenId]) => validTokenIds.has(tokenId)),
-    )
-  }
-  // 字段存在（含 {}）⇒ 权威全量，按它来。
-  return Object.fromEntries(
-    Object.entries(incoming ?? {}).filter(([tokenId]) => validTokenIds.has(tokenId)),
-  )
-}
-
-interface SharedDodgeState {
-  id: string
-  mapId: string
-  status: 'pending' | 'rolling' | 'answered' | 'done'
-  result: EnemyTurnResult
-  targetCharId: string
-  wantsDodge?: boolean
-  dodgeD20?: number
-  dodgeApSpent?: boolean
-  expiresAt?: number
-  updatedAt: number
-}
-
-interface SharedStableMindState {
-  id: string
-  mapId: string
-  status: 'pending' | 'answered' | 'done'
-  targetCharId: string
-  targetName: string
-  fullDamage: number
-  damageAfterSave: number
-  saveD20: number
-  saveMod: number
-  saveTotal: number
-  dc: number
-  useStableMind?: boolean
-  expiresAt?: number
-  updatedAt: number
-}
-
-interface SharedPlayerActionState {
-  id: string
-  mapId: string
-  combatId?: string
-  sourceMode: 'player'
-  status: 'pending' | 'done'
-  type: 'end-turn' | 'attack-token' | 'aoe-attack' | 'move-token' | 'qi-reduce-cooldown' | 'activate-feature'
-  actorTokenId: string
-  characterId: string
-  targetTokenId?: string
-  targetCell?: GridCell
-  targetPosition?: { x: number; y: number }
-  aoeRectRotation?: number
-  skillId?: string
-  featureKey?: ClassFeatureKey
-  round: number
-  initiativeIndex: number
-  seq: number
-  updatedAt: number
-}
-
-interface SharedPlayerActionAckState {
-  id: string
-  mapId: string
-  combatId?: string
-  actionId: string
-  status: 'accepted' | 'rejected'
-  reason?: string
-  acceptedPosition?: { x: number; y: number }
-  round: number
-  initiativeIndex: number
-  updatedAt: number
-}
-
-interface SharedDiceState {
-  id: string
-  mapId: string
-  sourceMode: Mode
-  status?: 'rolling' | 'result'
-  kind?: 'd20' | 'dice'
-  count?: number
-  sides?: number
-  values?: number[]
-  diceSeed?: string
-  traceFrames?: number[][]
-  animationSeed?: string
-  flyIndex?: number
-  label?: string
-  targetName?: string
-  roll?: DiceRoll
-  updatedAt: number
-}
-
-interface SharedDiceEventsState {
-  mapId: string
-  events: SharedDiceState[]
-  updatedAt: number
-}
-
-type SharedDiceStreamEvent =
-  | {
-      eventId: string
-      type: 'start'
-      mapId: string
-      sourceMode: Mode
-      requestId: string
-      kind: 'd20' | 'dice'
-      count?: number
-      sides?: number
-      values?: number[]
-      diceSeed?: string
-      flyIndex?: number
-      label: string
-      targetName: string
-      updatedAt: number
-    }
-  | {
-      eventId: string
-      type: 'frame'
-      mapId: string
-      sourceMode: Mode
-      requestId: string
-      kind: 'd20' | 'dice'
-      frame: number[]
-      index: number
-      updatedAt: number
-    }
-  | {
-      eventId: string
-      type: 'complete'
-      mapId: string
-      sourceMode: Mode
-      requestId: string
-      kind: 'd20' | 'dice'
-      value: number
-      values?: number[]
-      updatedAt: number
-    }
-
-type SharedDiceStreamPayload =
-  | Omit<Extract<SharedDiceStreamEvent, { type: 'start' }>, 'eventId' | 'mapId' | 'sourceMode' | 'updatedAt'>
-  | Omit<Extract<SharedDiceStreamEvent, { type: 'frame' }>, 'eventId' | 'mapId' | 'sourceMode' | 'updatedAt'>
-  | Omit<Extract<SharedDiceStreamEvent, { type: 'complete' }>, 'eventId' | 'mapId' | 'sourceMode' | 'updatedAt'>
-
-// T-P2-398 (398-A, strangler): result-broadcast path. DM emits ONE seedless
-// roll-request carrying the already-decided values; each end self-renders the
-// @values face independently. Intentionally NO seed/diceSeed field (AC2) — the
-// terminal face is carried by `values`, not reproduced from a seed. Lives on a
-// dedicated channel so it never touches the old dice-stream frame path (AC4).
-interface SharedRollRequestEvent {
-  eventId: string
-  mapId: string
-  sourceMode: Mode
-  requestId: string
-  kind: 'd20' | 'dice'
-  count: number
-  sides: number
-  values: number[]
-  label: string
-  targetName: string
-  updatedAt: number
-}
-
-type SharedRollRequestPayload = Omit<
-  SharedRollRequestEvent,
-  'eventId' | 'mapId' | 'sourceMode' | 'updatedAt'
->
-
-interface SharedCombatLogState {
-  mapId: string
-  entries: CombatLogEntry[]
-  updatedAt: number
-}
-
-type StatusType = 'burning' | 'poison'
-type CombatLogEntry = {
-  id: number
-  round: number
-  text: string
-  kind: 'system' | 'turn' | 'attack' | 'damage'
-  time: string
-}
-
-// [T5/C6] alias the canonical labels from tokenStatus.ts (single source) — these consts
-// keep their names so the ~20 reference sites are unchanged, but the literals live in one place.
-const STATUS_LABEL: Record<StatusType, string> = {
-  burning: CANON_BURNING_LABEL,
-  poison: CANON_POISON_LABEL,
-}
-const RESTRAINED_STATUS_LABEL = CANON_RESTRAINED_LABEL
-const VULNERABLE_STATUS_LABEL = CANON_VULNERABLE_LABEL
-const NO_MOVE_STATUS_LABEL = CANON_NO_MOVE_LABEL
-
-const TOKEN_MOVE_MS = Math.ceil(TOKEN_MOVE_DURATION_S * 1000) + 80
-const DICE_ROLL_MS = 3200
-// [T12/F2] ORDERING INVARIANT：结算（overlay 可见窗口 + 结果 HUD）必须先于回合推进。
-// 推进延迟从共享时序契约 advanceDelayMs() 派生（= max(overlay 可见窗口, HUD) + ε），
-// 由构造保证 ≥ 结算窗口 RESOLUTION_MS，而不是靠几个魔数恰好相等。原先用
-// DICE_ROLL_MS+200=3400ms，反而 < HUD 自关闭 4000ms —— 推进会抢在结果卡定格之前。
-const ADVANCE_DELAY_MS = advanceDelayMs()
-if (ADVANCE_DELAY_MS < RESOLUTION_MS) {
-  // 不可达：advanceDelayMs() 由构造 = RESOLUTION_MS + ε ≥ RESOLUTION_MS。
-  // 留作回归护栏——若有人改坏了契约常量，开发期立即炸出来。
-  throw new Error(
-    `[T12/F2] 时序契约被破坏：ADVANCE_DELAY_MS(${ADVANCE_DELAY_MS}) < RESOLUTION_MS(${RESOLUTION_MS})`,
-  )
-}
-// [T2] reentrancy guard window: blocks a second initiative advance within this
-// window of another (manual + timer, or two death-skip effects firing). Mirrors
-// the previously-inline 350ms in advanceInitiative.
-const ADVANCE_GUARD_MS = 350
-// [T2/A6] bounded fallback so a superseded death dice-overlay (no onDone) can't
-// stall combat-end forever. Must be >= the longest dice overlay visible window.
-const DEATH_KEY_WATCHDOG_MS = 5000
-
-const SINGLE_TARGET_RANGE_FEET: Record<string, number> = {
-  basicShot: 90,
-  multiShot: 30,
-  clusterShot: 20,
-  netArrow: 60,
-  explosiveArrow: 60,
-  vineHookShot: 20,
-  magicArrow: 60,
-  arcaneBreak: 90,
-  windStepShot: 60,
-}
-
-function singleTargetRangeFeet(skill: CombatSkill): number | null {
-  if (!skill.tags?.includes('ranged') && !isBasicShot(skill)) return null
-  if (skill.skillTreeId && SINGLE_TARGET_RANGE_FEET[skill.skillTreeId] != null) {
-    return SINGLE_TARGET_RANGE_FEET[skill.skillTreeId]
-  }
-  return 90
-}
-
-function statusDuration(skill: CombatSkill, type: StatusType): number | undefined {
-  if (skill.statusOnHit === type) return skill.statusDuration ?? (type === 'burning' ? 3 : 4)
-  if (type === 'burning' && skill.name === '火球术') return skill.statusDuration ?? 3
-  if (type === 'poison' && skill.name === '毒云术') return skill.statusDuration ?? 4
-  return undefined
-}
-
-function rollInitiative(_token: Token, character?: Character): number {
-  const d20 = 1 + Math.floor(Math.random() * 20)
-  if (character) {
-    return d20 + getEffectiveAbilityMod(character, 'dex') + character.initiativeBonus
-  }
-  return d20 + Math.floor(Math.random() * 5)
-}
-
-function buildInitiativeOrder(tokens: Token[], characters: Character[]): InitiativeEntry[] {
-  return tokens
-    .filter((token) => token.type !== 'obstacle')
-    .map((token) => {
-      const ch = token.characterId ? characters.find((c) => c.id === token.characterId) : undefined
-      return {
-        tokenId: token.id,
-        label: token.label,
-        emoji: token.emoji,
-        color: token.color,
-        accent: ch?.accent,
-        roll: rollInitiative(token, ch),
-      }
-    })
-    .sort((a, b) => b.roll - a.roll)
-}
-
-function tokenIntersectsDeleteRect(token: Token, rect: DeleteSelectionRect, gridSize: number): boolean {
-  const tokenSize = Math.max(1, token.size || 1) * gridSize
-  const half = tokenSize / 2
-  const left = token.x - half
-  const right = token.x + half
-  const top = token.y - half
-  const bottom = token.y + half
-  return right >= rect.x && left <= rect.x + rect.width && bottom >= rect.y && top <= rect.y + rect.height
-}
 
 export default function MapsPage() {
   const fileRef = useRef<HTMLInputElement>(null)
@@ -760,24 +483,6 @@ export default function MapsPage() {
     sharedStableMindPrompt?.id,
     sharedStableMindPrompt?.expiresAt,
   ])
-
-  const hashDiceSeed = (text: string): number => {
-    let hash = 2166136261
-    for (let i = 0; i < text.length; i += 1) {
-      hash ^= text.charCodeAt(i)
-      hash = Math.imul(hash, 16777619)
-    }
-    return hash >>> 0
-  }
-
-  const seededDieValue = (seed: string, sides: number): number => {
-    let state = hashDiceSeed(seed) || 1
-    state = (state + 0x6d2b79f5) | 0
-    let next = Math.imul(state ^ (state >>> 15), 1 | state)
-    next ^= next + Math.imul(next ^ (next >>> 7), 61 | next)
-    const unit = ((next ^ (next >>> 14)) >>> 0) / 4294967296
-    return 1 + Math.floor(unit * Math.max(2, Math.round(sides)))
-  }
 
   useEffect(() => {
     enemyApByTokenRef.current = enemyApByToken
