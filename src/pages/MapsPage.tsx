@@ -137,6 +137,7 @@ import {
 } from '../lib/combatTokens'
 import { enemyTemplateToTokenPatch, type EnemyTemplate } from '../lib/enemyPool'
 import { IGNITE_STATUS_LABEL } from '../lib/ignite'
+import { dotDamageFor } from '../lib/statusDamage'
 import {
   formatKnockbackSaveLabel,
   getTokenAbilityMod,
@@ -643,6 +644,8 @@ export default function MapsPage() {
   // [T1] dedupe set so the turn-driver doesn't stack multiple skip timers for the
   // same npc/obstacle slot across re-renders. Cleared on combat start/end.
   const nonActorSkippedKeysRef = useRef(new Set<string>())
+  // [T3/C2] dedupe set for stun skips (same anti-stack purpose). Cleared on start/end.
+  const stunSkippedKeysRef = useRef(new Set<string>())
   const enemyTurnTimersRef = useRef<number[]>([])
   const pendingSharedDodgeRef = useRef<{
     id: string
@@ -3343,14 +3346,18 @@ export default function MapsPage() {
   const applyDamageToToken = async (
     target: Token,
     amount: number,
-    opts?: { damageType?: 'physical' | 'magic'; caster?: Character },
+    opts?: { damageType?: 'physical' | 'magic'; caster?: Character; raw?: boolean },
   ) => {
     if (!activeMap) return
     const damageType = opts?.damageType ?? 'physical'
     const attackerInput = opts?.caster ? characterToCombatInput(opts.caster) : undefined
     if (target.characterId) {
       const ch = useCharacterStore.getState().characters.find((c) => c.id === target.characterId)
-      const finalAmount = ch
+      // [T3] raw=true (DOT ticks) bypasses the attack/defense modifier so the per-tick
+      // HP loss is exactly the configured constant, independent of defender resistances.
+      const finalAmount = opts?.raw
+        ? amount
+        : ch
         ? applyAttackDefenseDamageModifier(
             amount,
             attackerInput,
@@ -4320,6 +4327,7 @@ export default function MapsPage() {
     await clearCombatMessageQueues(activeMap.id, { clearCombatLog: true, combatId: nextCombatId })
     enemyAppliedKeysRef.current.clear()
     nonActorSkippedKeysRef.current.clear()
+    stunSkippedKeysRef.current.clear()
     playerTurnStartedRef.current.clear()
     multiStrikeHitsRef.current = {}
     setDisengagedCharIds(new Set())
@@ -4385,6 +4393,7 @@ export default function MapsPage() {
     setInitiativeScroll(0)
     enemyAppliedKeysRef.current.clear()
     nonActorSkippedKeysRef.current.clear()
+    stunSkippedKeysRef.current.clear()
     playerTurnStartedRef.current.clear()
     multiStrikeHitsRef.current = {}
     setDisengagedCharIds(new Set())
@@ -5120,6 +5129,17 @@ export default function MapsPage() {
           : null
         if (ch) charConds = [...ch.conditions]
 
+        // [T3/C1] Damage-over-time: burning/ignite/poison now actually deal HP each round
+        // (the tick previously only decremented counters — three DOT statuses were purely
+        // decorative). DM-only (AC0): computed once on the authority and broadcast via
+        // updateToken; players never tick locally, so no double-application. Applied as the
+        // summed total BEFORE the counter decrements, so a 1-turn DOT still deals its last
+        // tick. raw=true keeps the loss exactly the configured constant.
+        if (isDM) {
+          const dot = dotDamageFor(t)
+          if (dot > 0) void applyDamageToToken(t, dot, { raw: true })
+        }
+
         if (t.burningTurns && t.burningTurns > 0) {
           patch.burningTurns = t.burningTurns - 1
           if (patch.burningTurns === 0 && charConds) {
@@ -5852,6 +5872,20 @@ export default function MapsPage() {
     }
 
     if (!isTokenAlive(token, chars)) {
+      const timer = window.setTimeout(() => requestAdvance(), 50)
+      return () => window.clearTimeout(timer)
+    }
+
+    // [T3/C2] Stunned unit (player OR enemy) skips its entire turn. Previously stunTurns
+    // was applied/decremented/VFX'd but never checked here or in planEnemyTurn, so a
+    // stunned unit acted normally. Skipping here (before the enemy-schedule / player-begin
+    // branches) advances past it; the decrement at round-end (counter -1) restores it next
+    // round (AC5: stunTurns>0 => skip, ==0 => normal turn).
+    if ((token.stunTurns ?? 0) > 0) {
+      const stunKey = `stun-${round}-${initiativeIndex}-${token.id}`
+      if (stunSkippedKeysRef.current.has(stunKey)) return
+      stunSkippedKeysRef.current.add(stunKey)
+      pushCombatLog(`${token.label} 处于眩晕状态，跳过本回合。`, 'turn')
       const timer = window.setTimeout(() => requestAdvance(), 50)
       return () => window.clearTimeout(timer)
     }
