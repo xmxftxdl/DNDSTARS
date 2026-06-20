@@ -1,5 +1,12 @@
 import { canWriteSharedState } from './appMode'
 
+// [T11/AC2] DM 写共享态时附带的鉴权 secret。永远从环境读取，绝不硬编码/提交。
+// 服务端 STARS_SHARED_SECRET 未设时此 header 被忽略（鉴权关闭，零回归）。
+function sharedSecretHeader(): Record<string, string> {
+  const secret = import.meta.env.VITE_STARS_SHARED_SECRET as string | undefined
+  return secret ? { 'X-Stars-Secret': secret } : {}
+}
+
 function configuredApiBases(): string[] | null {
   const configured = import.meta.env.VITE_SHARED_API_BASES as string | undefined
   if (configured) {
@@ -86,7 +93,7 @@ export async function saveSharedResource<T>(name: string, data: T): Promise<void
     sharedWriteApiCandidates().map((api) =>
       fetch(`${api}/state/${name}`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...sharedSecretHeader() },
         body: JSON.stringify(data),
       }),
     ),

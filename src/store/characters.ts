@@ -42,6 +42,9 @@ function uid(): string {
 
 let lastSharedCharactersSnapshot = ''
 let lastLocalCharactersWriteAt = 0
+// [T11/AC6 · E6] 玩家端「已应用的最新 updatedAt」单调水位，丢弃乱序/陈旧的共享快照。
+// 与 DM 用的 lastLocalCharactersWriteAt 语义不同，故单列一个，避免相互污染。
+let lastAppliedCharactersUpdatedAt = 0
 let characterSaveSeq = 0
 
 /**
@@ -880,8 +883,13 @@ export const useCharacterStore = create<CharacterState>()(
             })
             return
           }
+          // [T11/AC6 · E6] 单调 guard：严格更旧的乱序快照丢弃（DM 与玩家两端都生效）。
+          const incomingUpdatedAt = shared.updatedAt ?? 0
+          if (incomingUpdatedAt < lastAppliedCharactersUpdatedAt) return
           const snapshot = JSON.stringify(shared)
+          // equality 短路只在内容真正未变时触发，不压制更新的 apply。
           if (snapshot === lastSharedCharactersSnapshot) return
+          lastAppliedCharactersUpdatedAt = incomingUpdatedAt
           lastSharedCharactersSnapshot = snapshot
           // [T10/AC2 · E11] 先剔除仍被墓碑标记的角色：对端一份仍含已删角色的全量快照
           // 不得复活它。墓碑过期后（GC）该过滤自动失效，被删 id 可被复用。

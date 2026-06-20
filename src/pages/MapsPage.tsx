@@ -186,6 +186,10 @@ interface SharedCombatState {
 }
 
 let lastSharedCombatSnapshot = ''
+// [T11/AC6 · E6] 已应用的 combat 快照单调水位（按 combatId 分段）。
+// 玩家端用它丢弃乱序/陈旧的 combat 广播；新 combatId（开/换战斗）重置水位，避免跨战斗误判。
+let lastAppliedCombatUpdatedAt = 0
+let lastAppliedCombatId = ''
 
 /**
  * [T10/AC4 · E13] enemyAP 的「读到的快照」如何调和进当前态。
@@ -981,10 +985,18 @@ export default function MapsPage() {
       enemyApByTokenRef.current,
       validTokenIds,
     )
+    const incomingCombatId = state.combatId ?? ''
+    // [T11/AC6 · E6] 单调 guard：同一 combatId 下丢弃 updatedAt 严格更旧的乱序广播。
+    // combatId 变化（新战斗/换战斗）⇒ 重置水位后照常接受。这样陈旧快照不会回退玩家端战斗态，
+    // 而真正更新的快照（更大 updatedAt 或新 combatId）一定不被压制。
+    const incomingUpdatedAt = state.updatedAt ?? 0
+    if (incomingCombatId === lastAppliedCombatId && incomingUpdatedAt < lastAppliedCombatUpdatedAt) return
     const snapshot = JSON.stringify({ state, tokenIds: Array.from(validTokenIds).sort() })
+    // equality 短路只在内容真正未变时触发，不压制更新的 apply（内容变 ⇒ snapshot 必不同）。
     if (snapshot === lastSharedCombatSnapshot) return
     lastSharedCombatSnapshot = snapshot
-    const incomingCombatId = state.combatId ?? ''
+    lastAppliedCombatId = incomingCombatId
+    lastAppliedCombatUpdatedAt = incomingUpdatedAt
     const combatChanged = incomingCombatId !== combatIdRef.current
     applyingSharedCombatRef.current = true
     combatIdRef.current = incomingCombatId

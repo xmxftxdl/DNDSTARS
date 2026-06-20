@@ -52,3 +52,31 @@ export async function deleteImage(id: string): Promise<void> {
     tx.onerror = () => reject(tx.error)
   })
 }
+
+/**
+ * [T11/AC4 · E9] 孤儿图片 GC（load-trigger）。
+ * 选定的 GC 触发器：「玩家端在 maps 快照应用时」按现存 map id 集合清理本地 IndexedDB。
+ * DM 删图会同步删服务端共享副本（deleteImage→deleteSharedImage），但玩家端 IndexedDB 里
+ * 那份旧副本不会被告知删除 —— 这里在每次 maps 同步落地后，把不再属于任何 map 的本地图片删掉，
+ * 闭合孤儿。不依赖服务端额外信令，纯客户端、幂等。
+ */
+export async function pruneOrphanImages(validIds: Iterable<string>): Promise<string[]> {
+  const keep = new Set(validIds)
+  const db = await openDB()
+  const allKeys: string[] = await new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, 'readonly')
+    const req = tx.objectStore(STORE).getAllKeys()
+    req.onsuccess = () => resolve((req.result as IDBValidKey[]).map((k) => String(k)))
+    req.onerror = () => reject(req.error)
+  })
+  const orphans = allKeys.filter((key) => !keep.has(key))
+  if (orphans.length === 0) return []
+  await new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(STORE, 'readwrite')
+    const store = tx.objectStore(STORE)
+    for (const key of orphans) store.delete(key)
+    tx.oncomplete = () => resolve()
+    tx.onerror = () => reject(tx.error)
+  })
+  return orphans
+}

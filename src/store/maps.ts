@@ -3,9 +3,10 @@ import { persist } from 'zustand/middleware'
 import { defaultTokenSizeForMap, realignTokensToGrid, snapToCellCenter } from '../lib/gridCombat'
 import { applyGridDetectPatch, type GridDetectResult } from '../lib/gridDetect'
 import { enemyTemplateToTokenPatch, type EnemyTemplate } from '../lib/enemyPool'
-import { putImage, deleteImage } from '../lib/imageStore'
+import { putImage, deleteImage, pruneOrphanImages } from '../lib/imageStore'
 import { loadSharedResource, saveSharedResource } from '../lib/sharedApi'
 import { canWriteSharedState, isPlayerPort } from '../lib/appMode'
+import { decideApply, type MonotonicState } from '../lib/monotonicGuard'
 function uid(): string {
   return Math.random().toString(36).slice(2, 10)
 }
@@ -256,12 +257,20 @@ export const useMapStore = create<MapState>()(
           if (canWriteSharedState()) publishMapsState(get())
           return
         }
-        if (!isPlayerPort() && (shared.updatedAt ?? 0) < lastSharedMapsUpdatedAt) return
-        lastSharedMapsUpdatedAt = shared.updatedAt ?? lastSharedMapsUpdatedAt
-        const snapshot = JSON.stringify(shared)
-        if (snapshot === lastSharedMapsSnapshot) return
-        lastSharedMapsSnapshot = snapshot
+        // [T11/AC6 · E6] 单调 guard：丢弃 updatedAt 严格更旧的乱序/陈旧快照。
+        // 旧实现仅在 !isPlayerPort() 时做此检查 —— 玩家端裸接受任意顺序的快照，乱序写会回退状态。
+        // 现在 DM 与玩家两端都走同一纯 guard（decideApply），相等时落内容 equality 短路。
+        const prevGuard: MonotonicState = {
+          lastUpdatedAt: lastSharedMapsUpdatedAt,
+          lastSnapshot: lastSharedMapsSnapshot,
+        }
+        const decision = decideApply(prevGuard, shared.updatedAt ?? 0, JSON.stringify(shared))
+        if (!decision.apply) return
+        lastSharedMapsUpdatedAt = decision.next.lastUpdatedAt
+        lastSharedMapsSnapshot = decision.next.lastSnapshot
         set({ maps: shared.maps, selectedId: shared.selectedId ?? shared.maps[0]?.id ?? null })
+        // [T11/AC4 · E9] 玩家端在 maps 同步落地后 GC 孤儿图片（已删 map 的本地 IndexedDB 副本）。
+        if (isPlayerPort()) void pruneOrphanImages(shared.maps.map((m) => m.id))
       },
       select: (id) => set({ selectedId: id }),
 
