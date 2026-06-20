@@ -1,7 +1,7 @@
-﻿import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import type { DependencyList } from 'react'
 import { Stage, Layer, Image as KonvaImage, Line, Group, Circle, Text, Rect, Arrow } from 'react-konva'
 import Konva from 'konva'
-import useImage from 'use-image'
 import { getImage } from '../../lib/imageStore'
 import {
   loadCalmMindIcon,
@@ -37,6 +37,66 @@ import {
 const TOKEN_MOVE_DURATION = TOKEN_MOVE_DURATION_S
 // [T8/AC5 · D5] 拖拽位移低于该像素阈值视为点击/抖动，不提交移动/广播。
 const TOKEN_DRAG_THRESHOLD_PX = 4
+
+// [T9/AC3 · D11] 状态特效动画统一节流帧率上限。
+// 中毒(~19-23 径向渐变圆)/燃烧/眩晕等常驻动画原本以满 RAF(~60fps) 运行，多 token 叠加掉帧。
+// 这些特效是慢速脉动/飘动，30fps 视觉上等效但 GPU/重绘开销约减半。
+const STATUS_ANIM_FPS = 30
+
+/**
+ * [T9/AC3 · D11] 受控的 Konva 状态特效动画 Hook。
+ * - active=false 时不启动动画（gate start/stop on 状态在场/可见性）；
+ *   各状态特效组件本身已按 active 状态条件渲染，这里再显式 gate 一层，
+ *   即使组件已挂载，只在 active 时驱动动画，clear 时立即 stop。
+ * - 用 fps 上限节流回调：仅当距上次渲染 ≥ 1/fps 才执行 callback，
+ *   但传入的 frame.time 仍是真实经过时间，因此节流不会冻结正在进行的特效，
+ *   只是渲染得更稀疏（更省）。
+ *
+ * getLayer 在每帧由调用方提供节点取 layer（ref 在挂载后才有值）。
+ */
+function useStatusAnimation(
+  getLayer: () => Konva.Layer | null,
+  callback: (frame: { time: number } | null) => void,
+  deps: DependencyList,
+  options?: { active?: boolean; fps?: number },
+) {
+  const active = options?.active ?? true
+  const fps = options?.fps ?? STATUS_ANIM_FPS
+  const callbackRef = useRef(callback)
+  callbackRef.current = callback
+
+  useEffect(() => {
+    if (!active) return
+    const minDelta = fps > 0 ? 1000 / fps : 0
+    let lastRender = -Infinity
+    let anim: Konva.Animation | null = null
+    let raf = 0
+
+    const start = () => {
+      const layer = getLayer()
+      if (!layer) {
+        // layer 尚未挂载（ref 在首帧可能为空），下一帧重试。
+        raf = requestAnimationFrame(start)
+        return
+      }
+      anim = new Konva.Animation((frame) => {
+        const time = frame?.time ?? 0
+        // 节流：未到帧预算则跳过本次重绘（frame.time 仍为真实时间，特效不冻结）。
+        if (minDelta > 0 && time - lastRender < minDelta) return
+        lastRender = time
+        callbackRef.current(frame ? { time: frame.time } : null)
+      }, layer)
+      anim.start()
+    }
+
+    start()
+    return () => {
+      cancelAnimationFrame(raf)
+      anim?.stop()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active, fps, ...deps])
+}
 
 import { useMapStore } from '../../store/maps'
 import type { BattleMap, Token } from '../../store/maps'
@@ -601,7 +661,7 @@ function PreciseStrikeBadge({ radius, gridIndex = 0 }: { radius: number; gridInd
   )
 }
 
-/** 闈欏績瑙掓爣 */
+/** 静心角标 */
 function CalmMindBadge({ radius, gridIndex = 0 }: { radius: number; gridIndex?: number }) {
   const [iconCanvas, setIconCanvas] = useState<HTMLCanvasElement | null>(null)
 
@@ -627,7 +687,7 @@ function CalmMindBadge({ radius, gridIndex = 0 }: { radius: number; gridIndex?: 
   )
 }
 
-/** 姘斿枠瑙掓爣 */
+/** 气喘角标 */
 function OutOfBreathBadge({ radius, gridIndex = 0 }: { radius: number; gridIndex?: number }) {
   const [iconCanvas, setIconCanvas] = useState<HTMLCanvasElement | null>(null)
 
@@ -692,8 +752,7 @@ export default function MapCanvas({
     origOy: number
   } | null>(null)
   const [size, setSize] = useState({ width: 800, height: 600 })
-  const [url, setUrl] = useState<string>('')
-  const [image] = useImage(url)
+  const [image, setImage] = useState<HTMLImageElement | undefined>(undefined)
   const [view, setView] = useState({ scale: 1, x: 0, y: 0 })
   const [hoveredTokenId, setHoveredTokenId] = useState<string | null>(null)
   const [dragPreviewPositions, setDragPreviewPositions] = useState<Record<string, Point>>({})
@@ -812,17 +871,44 @@ export default function MapCanvas({
     snapMeasure ? snapToCellCenter(raw.x, raw.y, map) : raw
 
   // 从 IndexedDB 取图片
+  // 单一所有者：本 effect 独占管理 blob URL 的创建/解码/释放，
+  // 不再由 useImage 与手动 createObjectURL 双重托管同一 URL（避免快速切图时的撕裂/闪烁）。
+  // URL 在图片 onload（解码完成、不再需要 URL）后立即 revoke；
+  // 切图/卸载时若尚未解码，则在 cleanup 中取消加载并 revoke，杜绝泄漏。
   useEffect(() => {
-    let revoked = ''
+    let cancelled = false
+    let objectUrl = ''
+    let img: HTMLImageElement | null = null
     getImage(map.id).then((blob) => {
-      if (blob) {
-        const u = URL.createObjectURL(blob)
-        revoked = u
-        setUrl(u)
+      if (cancelled || !blob) return
+      objectUrl = URL.createObjectURL(blob)
+      img = new window.Image()
+      img.onload = () => {
+        if (cancelled) return
+        setImage(img ?? undefined)
+        // 解码完成后 URL 已不再需要，立即释放。
+        URL.revokeObjectURL(objectUrl)
+        objectUrl = ''
       }
+      img.onerror = () => {
+        if (objectUrl) {
+          URL.revokeObjectURL(objectUrl)
+          objectUrl = ''
+        }
+      }
+      img.src = objectUrl
     })
     return () => {
-      if (revoked) URL.revokeObjectURL(revoked)
+      cancelled = true
+      if (img) {
+        img.onload = null
+        img.onerror = null
+      }
+      // 若图片尚未解码（onload 未触发），cleanup 仍需 revoke 以防泄漏。
+      if (objectUrl) {
+        URL.revokeObjectURL(objectUrl)
+        objectUrl = ''
+      }
     }
   }, [map.id])
 
@@ -2225,13 +2311,9 @@ function BurningGlow({ radius }: { radius: number }) {
   const glowRef = useRef<Konva.Circle>(null)
   const ringRef = useRef<Konva.Circle>(null)
 
-  useEffect(() => {
-    const node = glowRef.current
-    if (!node) return
-    const layer = node.getLayer()
-    if (!layer) return
-
-    const anim = new Konva.Animation((frame) => {
+  useStatusAnimation(
+    () => glowRef.current?.getLayer() ?? null,
+    (frame) => {
       const t = (frame?.time ?? 0) / 1000
       if (glowRef.current) {
         glowRef.current.radius(radius * (1.12 + Math.sin(t * 5.5) * 0.1))
@@ -2241,12 +2323,9 @@ function BurningGlow({ radius }: { radius: number }) {
         ringRef.current.radius(radius * (1.08 + Math.sin(t * 4) * 0.06))
         ringRef.current.opacity(0.5 + Math.sin(t * 8) * 0.2)
       }
-    }, layer)
-    anim.start()
-    return () => {
-      anim.stop()
-    }
-  }, [radius])
+    },
+    [radius],
+  )
 
   return (
     <Group listening={false}>
@@ -2269,13 +2348,9 @@ function BurningFlames({ radius }: { radius: number }) {
   const groupRef = useRef<Konva.Group>(null)
   const particleRefs = useRef<(Konva.Circle | null)[]>([])
 
-  useEffect(() => {
-    const group = groupRef.current
-    if (!group) return
-    const layer = group.getLayer()
-    if (!layer) return
-
-    const anim = new Konva.Animation((frame) => {
+  useStatusAnimation(
+    () => groupRef.current?.getLayer() ?? null,
+    (frame) => {
       const t = (frame?.time ?? 0) / 1000
       particleRefs.current.forEach((p, i) => {
         if (!p) return
@@ -2287,12 +2362,9 @@ function BurningFlames({ radius }: { radius: number }) {
         p.opacity(0.5 + Math.sin(t * 9 + i * 2) * 0.4)
         p.radius(radius * (0.07 + (i % 3) * 0.012 + Math.sin(t * 6 + i) * 0.022))
       })
-    }, layer)
-    anim.start()
-    return () => {
-      anim.stop()
-    }
-  }, [radius])
+    },
+    [radius],
+  )
 
   return (
     <Group ref={groupRef} listening={false}>
@@ -2320,15 +2392,11 @@ function StunOrbitStars({ radius }: { radius: number }) {
   const groupRef = useRef<Konva.Group>(null)
   const starRefs = useRef<(Konva.Text | null)[]>([])
 
-  useEffect(() => {
-    const group = groupRef.current
-    if (!group) return
-    const layer = group.getLayer()
-    if (!layer) return
-
-    const orbitR = radius * 0.62
-    const centerY = -radius * 1.22
-    const anim = new Konva.Animation((frame) => {
+  const orbitR = radius * 0.62
+  const centerY = -radius * 1.22
+  useStatusAnimation(
+    () => groupRef.current?.getLayer() ?? null,
+    (frame) => {
       const t = (frame?.time ?? 0) / 1000
       starRefs.current.forEach((star, i) => {
         if (!star) return
@@ -2339,12 +2407,9 @@ function StunOrbitStars({ radius }: { radius: number }) {
         star.rotation((t * 220 + i * 90) % 360)
         star.opacity(0.75 + Math.sin(t * 6 + i) * 0.25)
       })
-    }, layer)
-    anim.start()
-    return () => {
-      anim.stop()
-    }
-  }, [radius])
+    },
+    [radius],
+  )
 
   const starSize = Math.max(10, radius * 0.34)
   return (
@@ -2374,20 +2439,17 @@ function StunOrbitStars({ radius }: { radius: number }) {
 function StunGlow({ radius }: { radius: number }) {
   const ringRef = useRef<Konva.Circle>(null)
 
-  useEffect(() => {
-    const ring = ringRef.current
-    if (!ring) return
-    const anim = new Konva.Animation((frame) => {
-      if (!frame) return
+  useStatusAnimation(
+    () => ringRef.current?.getLayer() ?? null,
+    (frame) => {
+      const ring = ringRef.current
+      if (!ring || !frame) return
       const t = frame.time / 600
       ring.opacity(0.2 + Math.sin(t) * 0.15)
       ring.radius(radius + 3 + Math.sin(t * 1.2) * 2)
-    }, ring.getLayer())
-    anim.start()
-    return () => {
-      anim.stop()
-    }
-  }, [radius])
+    },
+    [radius],
+  )
 
   return (
     <Circle
@@ -2405,20 +2467,17 @@ function StunGlow({ radius }: { radius: number }) {
 function KnockbackLiftGlow({ radius }: { radius: number }) {
   const ringRef = useRef<Konva.Circle>(null)
 
-  useEffect(() => {
-    const ring = ringRef.current
-    if (!ring) return
-    const anim = new Konva.Animation((frame) => {
-      if (!frame) return
+  useStatusAnimation(
+    () => ringRef.current?.getLayer() ?? null,
+    (frame) => {
+      const ring = ringRef.current
+      if (!ring || !frame) return
       const t = frame.time / 700
       ring.opacity(0.22 + Math.sin(t) * 0.12)
       ring.radius(radius + 4 + Math.sin(t * 1.4) * 2)
-    }, ring.getLayer())
-    anim.start()
-    return () => {
-      anim.stop()
-    }
-  }, [radius])
+    },
+    [radius],
+  )
 
   return (
     <Circle
@@ -2437,12 +2496,12 @@ function CalmMindAura({ radius }: { radius: number }) {
   const ringRef = useRef<Konva.Circle>(null)
   const glowRef = useRef<Konva.Circle>(null)
 
-  useEffect(() => {
-    const ring = ringRef.current
-    const glow = glowRef.current
-    const layer = ring?.getLayer() ?? glow?.getLayer()
-    if (!ring || !glow || !layer) return
-    const anim = new Konva.Animation((frame) => {
+  useStatusAnimation(
+    () => ringRef.current?.getLayer() ?? glowRef.current?.getLayer() ?? null,
+    (frame) => {
+      const ring = ringRef.current
+      const glow = glowRef.current
+      if (!ring || !glow) return
       const t = (frame?.time ?? 0) / 1000
       const pulse = 0.5 + Math.sin(t * 1.7) * 0.5
       ring.radius(radius + 4 + pulse * 3)
@@ -2450,12 +2509,9 @@ function CalmMindAura({ radius }: { radius: number }) {
       ring.rotation((t * 28) % 360)
       glow.radius(radius * (1.12 + pulse * 0.08))
       glow.opacity(0.14 + pulse * 0.1)
-    }, layer)
-    anim.start()
-    return () => {
-      anim.stop()
-    }
-  }, [radius])
+    },
+    [radius],
+  )
 
   return (
     <Group listening={false}>
@@ -2496,11 +2552,11 @@ function OutOfBreathHeat({ radius }: { radius: number }) {
   const ringRef = useRef<Konva.Circle>(null)
   const particleRefs = useRef<(Konva.Circle | null)[]>([])
 
-  useEffect(() => {
-    const ring = ringRef.current
-    const layer = ring?.getLayer()
-    if (!ring || !layer) return
-    const anim = new Konva.Animation((frame) => {
+  useStatusAnimation(
+    () => ringRef.current?.getLayer() ?? null,
+    (frame) => {
+      const ring = ringRef.current
+      if (!ring) return
       const t = (frame?.time ?? 0) / 1000
       const pulse = 0.5 + Math.sin(t * 3.1) * 0.5
       ring.radius(radius + 3 + pulse * 4)
@@ -2516,12 +2572,9 @@ function OutOfBreathHeat({ radius }: { radius: number }) {
         p.radius(radius * (0.045 + (i % 3) * 0.01))
         p.opacity((1 - rise) * (0.28 + pulse * 0.18))
       })
-    }, layer)
-    anim.start()
-    return () => {
-      anim.stop()
-    }
-  }, [radius])
+    },
+    [radius],
+  )
 
   return (
     <Group listening={false}>
@@ -2704,37 +2757,20 @@ function PoisonSmokeParticles({
   const groupRef = useRef<Konva.Group>(null)
   const particleRefs = useRef<(Konva.Circle | null)[]>([])
 
-  useEffect(() => {
-    const group = groupRef.current
-    if (!group) return
-
-    let anim: Konva.Animation | null = null
-    let raf = 0
-
-    const startAnim = () => {
-      const konvaLayer = group.getLayer()
-      if (!konvaLayer) {
-        raf = requestAnimationFrame(startAnim)
-        return
-      }
-
-      anim = new Konva.Animation((frame) => {
-        const t = (frame?.time ?? 0) / 1000
-        group.opacity(poisonFogPulseOpacity(t))
-        particleRefs.current.forEach((node, i) => {
-          if (!node) return
-          animateFogLayer(node, particles[i], radius, t, opacityMul)
-        })
-      }, konvaLayer)
-      anim.start()
-    }
-
-    startAnim()
-    return () => {
-      cancelAnimationFrame(raf)
-      anim?.stop()
-    }
-  }, [radius, particles, opacityMul])
+  useStatusAnimation(
+    () => groupRef.current?.getLayer() ?? null,
+    (frame) => {
+      const group = groupRef.current
+      if (!group) return
+      const t = (frame?.time ?? 0) / 1000
+      group.opacity(poisonFogPulseOpacity(t))
+      particleRefs.current.forEach((node, i) => {
+        if (!node) return
+        animateFogLayer(node, particles[i], radius, t, opacityMul)
+      })
+    },
+    [radius, particles, opacityMul],
+  )
 
   return (
     <Group

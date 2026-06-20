@@ -4184,39 +4184,6 @@ export default function MapsPage() {
             return
           }
         }
-        /*
-        if (false && targeting.skill.skillTreeId === 'rageShot') {
-          const caster = characters.find((c) => c.id === targeting.casterId)
-          const rank = caster ? getSkillRank(caster, 'rageShot') : 0
-          if (rank >= 4 && activeMap) {
-            const candidates = activeMap.tokens.filter(
-              (t) => t.id !== tok.id && t.characterId !== targeting.casterId && isTokenAlive(t, characters),
-            )
-            const picked = candidates.length > 0
-              ? window.prompt(
-                  `怒气爆射可额外选择 1 名目标，输入编号；留空跳过：\n${candidates
-                    .map((t, i) => `${i + 1}. ${t.label}`)
-                    .join('\n')}`,
-                )
-              : null
-            const extra = candidates[Number(picked) - 1]
-            void (async () => {
-              await resolveAttack(tok, { skipCleanup: true })
-              if (extra) {
-                await resolveAttack(extra, {
-                  skipCleanup: true,
-                  skipUseSkill: true,
-                  silent: true,
-                })
-                pushCombatLog(`${targeting.skill.name} 额外目标：${extra.label} 已结算`, 'damage')
-              }
-              setTargeting(null)
-              setAoePreviewCell(null)
-            })()
-            return
-          }
-        }
-        */
         if (!isDM && sendPlayerAttackTokenRequest(tok, targeting.skill)) {
           setTargeting(null)
           setAoePreviewCell(null)
