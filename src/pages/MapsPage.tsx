@@ -51,6 +51,8 @@ import DiceRollOverlay from '../components/DiceRollOverlay'
 import type { DiceRoll } from '../components/DiceRollOverlay'
 import DiceBoxD20Overlay from '../components/DiceBoxD20Overlay'
 import DiceBoxRollOverlay from '../components/DiceBoxRollOverlay'
+// [T12/F2] 跨组件时序契约：回合推进延迟由 advanceDelayMs() 派生，保证 ≥ 结算窗口。
+import { advanceDelayMs, RESOLUTION_MS } from '../lib/diceOverlayShared'
 import { useMapStore, characterHpTokenPatch } from '../store/maps'
 import type { Token } from '../store/maps'
 import { useCharacterStore } from '../store/characters'
@@ -402,6 +404,18 @@ const NO_MOVE_STATUS_LABEL = CANON_NO_MOVE_LABEL
 
 const TOKEN_MOVE_MS = Math.ceil(TOKEN_MOVE_DURATION_S * 1000) + 80
 const DICE_ROLL_MS = 3200
+// [T12/F2] ORDERING INVARIANT：结算（overlay 可见窗口 + 结果 HUD）必须先于回合推进。
+// 推进延迟从共享时序契约 advanceDelayMs() 派生（= max(overlay 可见窗口, HUD) + ε），
+// 由构造保证 ≥ 结算窗口 RESOLUTION_MS，而不是靠几个魔数恰好相等。原先用
+// DICE_ROLL_MS+200=3400ms，反而 < HUD 自关闭 4000ms —— 推进会抢在结果卡定格之前。
+const ADVANCE_DELAY_MS = advanceDelayMs()
+if (ADVANCE_DELAY_MS < RESOLUTION_MS) {
+  // 不可达：advanceDelayMs() 由构造 = RESOLUTION_MS + ε ≥ RESOLUTION_MS。
+  // 留作回归护栏——若有人改坏了契约常量，开发期立即炸出来。
+  throw new Error(
+    `[T12/F2] 时序契约被破坏：ADVANCE_DELAY_MS(${ADVANCE_DELAY_MS}) < RESOLUTION_MS(${RESOLUTION_MS})`,
+  )
+}
 // [T2] reentrancy guard window: blocks a second initiative advance within this
 // window of another (manual + timer, or two death-skip effects firing). Mirrors
 // the previously-inline 350ms in advanceInitiative.
@@ -1318,7 +1332,7 @@ export default function MapsPage() {
       }
       if (seenSharedDiceIdsRef.current.has(state.id) || !state.roll) return
       seenSharedDiceIdsRef.current.add(state.id)
-      setRoll({ ...state.roll, diceBoxResolved: true })
+      setRoll({ ...state.roll })
     }
     const load = async () => {
       const eventState = await loadSharedResource<SharedDiceEventsState>('dice-events')
@@ -2557,7 +2571,7 @@ export default function MapsPage() {
     let isCrit = false
     let rollLabel: string
     let d20Roll:
-      | { value: number; modifier: number; ac: number; hit: boolean; isCrit?: boolean; source?: 'dice-box' }
+      | { value: number; modifier: number; ac: number; hit: boolean; isCrit?: boolean }
       | undefined
     let selfCooldownReduction = 0
     let featureExtraLabelParts: string[] = []
@@ -2643,7 +2657,6 @@ export default function MapsPage() {
         ac: atk.ac,
         hit,
         isCrit,
-        source: 'dice-box',
       }
 
       const d20Text =
@@ -3268,7 +3281,6 @@ export default function MapsPage() {
         formula: damageFormula,
         targetName: token.label,
         d20Roll,
-        diceBoxResolved: true,
       }
       setRoll(rollForDisplay)
       publishSharedDiceRoll(rollForDisplay)
@@ -3445,7 +3457,6 @@ export default function MapsPage() {
       sides: isBasicShot(skill) ? 8 : skill.damageSides,
       bonus: combinedTotal - combinedValues.reduce((sum, value) => sum + value, 0),
       total: combinedTotal,
-      diceBoxResolved: true,
       label: `${skill.name} · ${cellCount} 格 · ${targets.length} 名在范围内${anyHit ? '' : '（无命中）'}`,
       formula: anyHit
         ? `${combinedValues.join(' + ')}${combinedTotal - combinedValues.reduce((sum, value) => sum + value, 0) >= 0 ? ' + ' : ' - '}${Math.abs(combinedTotal - combinedValues.reduce((sum, value) => sum + value, 0))} = ${combinedTotal}`
@@ -3861,9 +3872,7 @@ export default function MapsPage() {
         ac: targetAc,
         hit,
         isCrit,
-        source: 'dice-box',
       },
-      diceBoxResolved: true,
     })
     pushCombatLog(
       `${attackerName} 借机攻击 ${targetName}：D20 ${d20} + ${attackBonus} = ${d20 + attackBonus} vs AC ${targetAc}，${hit ? '命中' : '未命中'}${formula ? `；伤害 ${formula}` : ''}；最终 ${total} 点伤害`,
@@ -4608,13 +4617,11 @@ export default function MapsPage() {
           ac: number
           hit: boolean
           kind?: 'dodge' | 'save'
-          source?: 'dice-box'
         }
       | undefined
     let damageRollValues = result.attack?.values ?? []
     let damageRollTotal = result.attack?.total ?? 0
     let damageRollBonus = result.attack?.bonus ?? 0
-    let damageDiceResolved = false
     const enemyFeatureLabels: string[] = []
 
     const inferEnemyDamageDiceCount = (attack: NonNullable<EnemyTurnResult['attack']>) => {
@@ -4676,7 +4683,6 @@ export default function MapsPage() {
         damageRollBonus = result.attack.bonus
       }
       damageRollTotal = Math.max(0, rawDamage)
-      damageDiceResolved = true
       return damageRollTotal
     }
 
@@ -4754,7 +4760,6 @@ export default function MapsPage() {
           const diceTotal = values.reduce((sum, value) => sum + value, 0)
           damageRollBonus = result.attack.bonus
           damageRollTotal = Math.max(0, diceTotal + result.attack.bonus)
-          damageDiceResolved = true
           estimatedDamage = Math.max(1, damageRollTotal)
         }
         const saveD20 = await rollDiceBoxD20('敏捷豁免 D20', targetChar.name)
@@ -4831,7 +4836,6 @@ export default function MapsPage() {
             ac: resolved.dodgeRoll.targetAc,
             hit: !resolved.dodged,
             kind: 'dodge',
-            source: 'dice-box',
           }
         }
         if (!resolved.dodged && resolved.damageDealt > 0) {
@@ -4879,7 +4883,6 @@ export default function MapsPage() {
             : undefined,
         targetName: result.attack.targetName,
         d20Roll,
-        diceBoxResolved: damageDiceResolved,
       }
       setRoll(enemyRollForDisplay)
       publishSharedDiceRoll(enemyRollForDisplay)
@@ -5105,7 +5108,7 @@ export default function MapsPage() {
       const latestMap = useMapStore.getState().maps.find((m) => m.id === activeMap.id)
       const latestEnemy = latestMap?.tokens.find((t) => t.id === enemy.id) ?? enemy
       if (!isTokenAlive(latestEnemy, useCharacterStore.getState().characters)) {
-        const id = window.setTimeout(advanceEnemyIfCurrent, DICE_ROLL_MS + 200)
+        const id = window.setTimeout(advanceEnemyIfCurrent, ADVANCE_DELAY_MS)
         enemyTurnTimersRef.current.push(id)
         return
       }
@@ -5159,7 +5162,7 @@ export default function MapsPage() {
               const stillAliveMap = useMapStore.getState().maps.find((m) => m.id === activeMap.id)
               const stillAliveEnemy = stillAliveMap?.tokens.find((t) => t.id === enemy.id) ?? latestEnemy
               if (!isTokenAlive(stillAliveEnemy, useCharacterStore.getState().characters)) {
-                pushTimer(advanceEnemyIfCurrent, DICE_ROLL_MS + 200)
+                pushTimer(advanceEnemyIfCurrent, ADVANCE_DELAY_MS)
                 return
               }
               updateToken(activeMap.id, enemy.id, { x: nextResult.newPosition!.x, y: nextResult.newPosition!.y })
@@ -5188,14 +5191,14 @@ export default function MapsPage() {
                 'turn',
               )
               applyEnemyAttack(nextResult, () => {
-                pushTimer(advanceEnemyIfCurrent, DICE_ROLL_MS + 200)
+                pushTimer(advanceEnemyIfCurrent, ADVANCE_DELAY_MS)
               })
               return
             }, DICE_ROLL_MS + 5000)
             return
           }
         }
-        pushTimer(advanceEnemyIfCurrent, DICE_ROLL_MS + 200)
+        pushTimer(advanceEnemyIfCurrent, ADVANCE_DELAY_MS)
       })
     }
 
