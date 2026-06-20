@@ -11,8 +11,9 @@ Branch: `override-upstream-gaps` (off `origin/main` @ `3b17221`). Repo: nested g
 - ✅ **T6** `6070b3c` — structured attack schema + derived stats for all 25 + unified HP source (B1/B2/B9/B10); AC0: pool↔block is a bijection of 25 (stale "superset/24" premise corrected). 44→57 tests
 - ✅ **T7** `6744484` — enemy AI uses real structured attacks + npc targeting + data-driven breath + DEFAULT_ENEMY_AC unified (3 sites) + stale-poolId warn-once + text hygiene (B3–B8/B11/B12); B7 dead `targetTokenPatch` branch+field removed. 57→64 tests
 - ✅ **T8** `a8a64bc` — selection clears on delete/death/map-switch + occupancy drop-guard + 4px drag threshold + fittedRef-reset (no remount) + hover-race fix + tracked tween cancel + keyboard move/delete (D1–D7,D10); AC4 prevented-by-construction; D13 dropped. 64→68 tests
-- ✅ **T9** — deleted dead rageShot block (if(false) was nested in it, one deletion) + blob-URL single owner (manual path, dropped useImage) + status-anim 30fps throttle & mount-gating (8 effects) + mojibake comments fixed + MapCanvas BOM stripped (D8–D12). 68 tests
-- ⬜ **T10** (next) → T11 → T12 → T13 → T14 → T15
+- ✅ **T9** `be725c5` — deleted dead rageShot block (if(false) was nested in it, one deletion) + blob-URL single owner (manual path, dropped useImage) + status-anim 30fps throttle & mount-gating (8 effects) + mojibake comments fixed + MapCanvas BOM stripped (D8–D12). 68 tests
+- ✅ **T10** — canonical characterHpTokenPatch HP mirror (no parallel reconciler) + character deletion tombstones (sync save, 10s GC) + maps store version 1 + migrate + enemyAp torn-read hardening (E4/E11/E10/E13). 68→81 tests
+- ⬜ **T11** (next) → T12 → T13 → T14 → T15
 - Each task: `npx tsc -b` + `npm test` (44 baseline) green before commit. Resume from the next ⬜ task; all context is in this file.
 
 ## Plan-review status

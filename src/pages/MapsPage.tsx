@@ -51,7 +51,7 @@ import DiceRollOverlay from '../components/DiceRollOverlay'
 import type { DiceRoll } from '../components/DiceRollOverlay'
 import DiceBoxD20Overlay from '../components/DiceBoxD20Overlay'
 import DiceBoxRollOverlay from '../components/DiceBoxRollOverlay'
-import { useMapStore } from '../store/maps'
+import { useMapStore, characterHpTokenPatch } from '../store/maps'
 import type { Token } from '../store/maps'
 import { useCharacterStore } from '../store/characters'
 import {
@@ -186,6 +186,32 @@ interface SharedCombatState {
 }
 
 let lastSharedCombatSnapshot = ''
+
+/**
+ * [T10/AC4 · E13] enemyAP 的「读到的快照」如何调和进当前态。
+ * enemyApByToken 本就是 SharedCombatState 的字段、随 publishCombatState 持久化、loadShared 时 restore —
+ * 已是服务端持久化（重连/刷新可恢复已花 AP）。本 helper 只硬化「撕裂读」边界：
+ *  - 快照带了 enemyApByToken（即便是 {}）⇒ 这是权威全量，按它来（过滤掉已不存在的 token）。
+ *  - 快照里该字段缺失（undefined，撕裂/旧形状）且本端仍持有已花 AP ⇒ 保留本端，不要把已花 AP
+ *    冲回空（空会让 tokenHp 显示回落到默认 {2,2}，等于凭空恢复 AP）。
+ * 纯函数，便于 T13 在不挂载组件下单测 restore-fires 与 torn-read-preserve 两条路径。
+ */
+export function reconcileEnemyAp(
+  incoming: Record<string, { current: number; max: number }> | undefined,
+  existing: Record<string, { current: number; max: number }>,
+  validTokenIds: Set<string>,
+): Record<string, { current: number; max: number }> {
+  // 撕裂读：字段缺失但本端已有已花 AP ⇒ 原样保留（仅过滤无效 token）。
+  if (incoming === undefined && Object.keys(existing).length > 0) {
+    return Object.fromEntries(
+      Object.entries(existing).filter(([tokenId]) => validTokenIds.has(tokenId)),
+    )
+  }
+  // 字段存在（含 {}）⇒ 权威全量，按它来。
+  return Object.fromEntries(
+    Object.entries(incoming ?? {}).filter(([tokenId]) => validTokenIds.has(tokenId)),
+  )
+}
 
 interface SharedDodgeState {
   id: string
@@ -949,8 +975,11 @@ export default function MapsPage() {
       ? Math.min(Math.max(0, state.initiativeIndex ?? 0), initiativeOrder.length - 1)
       : 0
     const active = Boolean(state.active && initiativeOrder.length > 0)
-    const enemyApByToken = Object.fromEntries(
-      Object.entries(state.enemyApByToken ?? {}).filter(([tokenId]) => validTokenIds.has(tokenId)),
+    // [T10/AC4] 硬化撕裂读：字段缺失而本端持有已花 AP 时保留本端，避免凭空恢复 AP 到 {2,2}。
+    const enemyApByToken = reconcileEnemyAp(
+      state.enemyApByToken,
+      enemyApByTokenRef.current,
+      validTokenIds,
     )
     const snapshot = JSON.stringify({ state, tokenIds: Array.from(validTokenIds).sort() })
     if (snapshot === lastSharedCombatSnapshot) return
@@ -2279,10 +2308,8 @@ export default function MapsPage() {
     if (token.characterId) {
       damageChar(token.characterId, amount)
       const updated = useCharacterStore.getState().characters.find((c) => c.id === token.characterId)
-      updateToken(activeMap.id, token.id, {
-        hp: updated?.currentHp,
-        maxHp: updated?.maxHp,
-      })
+      // [T10/AC1] 经唯一镜像 helper 写回 token.hp。
+      if (updated) updateToken(activeMap.id, token.id, characterHpTokenPatch(updated))
       if (updated && updated.currentHp <= 0) deferDeathHandling(token.id, token.characterId)
     } else if (token.maxHp != null) {
       const hp = Math.max(0, (token.hp ?? token.maxHp) - amount)
@@ -3449,7 +3476,8 @@ export default function MapsPage() {
       damageChar(target.characterId, finalAmount)
       const updated = useCharacterStore.getState().characters.find((c) => c.id === target.characterId)
       if (updated) {
-        const patch: Partial<Token> = { hp: updated.currentHp, maxHp: updated.maxHp }
+        // [T10/AC1] DOT 每回合掉血路径同样经唯一镜像 helper 写回 token.hp。
+        const patch: Partial<Token> = characterHpTokenPatch(updated)
         if (
           finalAmount > 0 &&
           opts?.caster &&
@@ -3796,7 +3824,8 @@ export default function MapsPage() {
           damageChar(targetChar.id, total)
           const updated = useCharacterStore.getState().characters.find((c) => c.id === targetChar.id)
           if (updated) {
-            updateToken(activeMap.id, targetToken.id, { hp: updated.currentHp, maxHp: updated.maxHp })
+            // [T10/AC1] 经唯一镜像 helper 写回 token.hp。
+            updateToken(activeMap.id, targetToken.id, characterHpTokenPatch(updated))
             if (updated.currentHp <= 0) deferDeathHandling(targetToken.id, targetChar.id)
           }
         } else if (targetToken.maxHp != null) {
@@ -4642,10 +4671,8 @@ export default function MapsPage() {
     const syncTargetHp = (charId: string) => {
       const updated = useCharacterStore.getState().characters.find((c) => c.id === charId)
       if (updated) {
-        updateToken(activeMap.id, result.targetTokenId!, {
-          hp: updated.currentHp,
-          maxHp: updated.maxHp,
-        })
+        // [T10/AC1] 经唯一镜像 helper 把 currentHp 写回 token.hp，杜绝任何路径绕过。
+        updateToken(activeMap.id, result.targetTokenId!, characterHpTokenPatch(updated))
         if (updated.currentHp <= 0) {
           deferDeathHandling(result.targetTokenId!, charId)
         }

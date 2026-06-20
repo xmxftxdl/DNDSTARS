@@ -43,6 +43,54 @@ function uid(): string {
 let lastSharedCharactersSnapshot = ''
 let lastLocalCharactersWriteAt = 0
 let characterSaveSeq = 0
+
+/**
+ * [T10/AC2 · E11] 删除墓碑：id ⇒ 删除时间戳。
+ * 没有墓碑时，一次本地删除若落在 `setTimeout(saveCharacters,0)` 窗口内、或对端尚未看到该删除，
+ * 对端一份仍含该角色的「全量数组」快照就会在 loadShared 里把它复活。墓碑在有界窗口内抑制复活：
+ * loadShared 应用共享快照时过滤掉仍被墓碑标记的 id。
+ * 窗口需 ≥ 轮询周期（characters 轮询 ~500ms，见 MapsPage）以覆盖一来回，并在过期后 GC，
+ * 这样被删 id 之后可被复用（例如重新创建同名角色拿到回收 id 时不会被旧墓碑误杀）。
+ */
+const CHARACTER_TOMBSTONE_TTL_MS = 10000
+const characterTombstones = new Map<string, number>()
+
+/** 记录一条删除墓碑（id + 当前时间）。删除路径必须在写出快照前调用。 */
+export function recordCharacterTombstone(id: string, now: number = Date.now()): void {
+  characterTombstones.set(id, now)
+}
+
+/** 清掉超过 TTL 的墓碑，使被删 id 可被复用；返回存活墓碑数（便于测试）。 */
+export function gcCharacterTombstones(now: number = Date.now()): number {
+  for (const [id, ts] of characterTombstones) {
+    if (now - ts > CHARACTER_TOMBSTONE_TTL_MS) characterTombstones.delete(id)
+  }
+  return characterTombstones.size
+}
+
+/** 该 id 当前是否仍被墓碑标记（自动顺带 GC 过期项）。 */
+export function isCharacterTombstoned(id: string, now: number = Date.now()): boolean {
+  gcCharacterTombstones(now)
+  return characterTombstones.has(id)
+}
+
+/** 测试钩子：清空全部墓碑。 */
+export function clearCharacterTombstonesForTest(): void {
+  characterTombstones.clear()
+}
+
+/**
+ * [T10/AC2] 从一份待应用的共享角色数组里剔除仍被墓碑标记的角色，阻止复活。
+ * 纯函数，便于 T13 在不挂载组件、不碰 localStorage 的前提下单测。
+ */
+export function filterTombstonedCharacters(
+  characters: Character[],
+  now: number = Date.now(),
+): Character[] {
+  gcCharacterTombstones(now)
+  if (characterTombstones.size === 0) return characters
+  return characters.filter((c) => !characterTombstones.has(c.id))
+}
 let traitChoiceSyncStarted = false
 let stopTraitChoiceSync: (() => void) | null = null
 const seenTraitChoiceEventIds = new Set<string>()
@@ -835,11 +883,17 @@ export const useCharacterStore = create<CharacterState>()(
           const snapshot = JSON.stringify(shared)
           if (snapshot === lastSharedCharactersSnapshot) return
           lastSharedCharactersSnapshot = snapshot
-          const sharedCharacters = shared.characters.map(finalizeCharacter)
+          // [T10/AC2 · E11] 先剔除仍被墓碑标记的角色：对端一份仍含已删角色的全量快照
+          // 不得复活它。墓碑过期后（GC）该过滤自动失效，被删 id 可被复用。
+          const sharedCharacters = filterTombstonedCharacters(shared.characters).map(finalizeCharacter)
           const localCharacters = get().characters
+          const nextSelectedId = shared.selectedId ?? sharedCharacters[0]?.id ?? null
           set({
             characters: mergePendingLocalTraitChoices(sharedCharacters, localCharacters),
-            selectedId: shared.selectedId ?? shared.characters[0]?.id ?? null,
+            selectedId:
+              nextSelectedId && isCharacterTombstoned(nextSelectedId)
+                ? (sharedCharacters[0]?.id ?? null)
+                : nextSelectedId,
           })
           if (shared.updatedAt != null) lastLocalCharactersWriteAt = shared.updatedAt
         },
@@ -877,16 +931,20 @@ export const useCharacterStore = create<CharacterState>()(
               syncArcherCombatSkills(syncArcherTraits(ensureDefaultEquipment({ ...c, ...patch }))),
             ),
           ),
-        remove: (id) =>
+        remove: (id) => {
+          // [T10/AC2 · E11] 先立墓碑，再同步写出快照（不再 setTimeout(...,0) 异步写）。
+          // 异步窗口曾是复活竞态的根源：删除已生效但快照尚未写出时，对端旧全量快照一旦在
+          // loadShared 里被应用就会复活该角色。墓碑 + 同步 save 双保险关闭这个窗口。
+          recordCharacterTombstone(id)
           set((s) => {
             const characters = s.characters.filter((c) => c.id !== id)
-            const next = {
+            return {
               characters,
               selectedId: s.selectedId === id ? (characters[0]?.id ?? null) : s.selectedId,
             }
-            window.setTimeout(saveCharacters, 0)
-            return next
-          }),
+          })
+          saveCharacters()
+        },
         longRestAll: () => {
           set((s) => ({
             characters: s.characters.map((c) =>

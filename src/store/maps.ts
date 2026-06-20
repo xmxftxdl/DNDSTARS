@@ -133,6 +133,86 @@ export interface BattleMap {
   tokens: Token[]
 }
 
+/**
+ * [T10/AC3 · E10] maps 持久化版本号。characters store 早已带 version+migrate（version 19），
+ * 而 maps store 此前裸跑 `{ name:'stars-maps' }`，没有版本/迁移：任何旧 localStorage 形状
+ * 一旦缺字段（如早期 token 没有 type、map 没有 tokens 数组）就可能在渲染期炸掉。
+ * 这里补齐 version + migrate，把任意旧/残缺形状规整为当前 BattleMap 形状。
+ */
+export const MAPS_PERSIST_VERSION = 1
+
+const TOKEN_TYPES: ReadonlyArray<Token['type']> = ['player', 'enemy', 'npc', 'obstacle']
+
+/** 把任意（可能是旧版本、可能残缺）的 token 形状规整为当前 Token 形状。 */
+function normalizeToken(raw: unknown): Token {
+  const t = (raw ?? {}) as Partial<Token>
+  const type = TOKEN_TYPES.includes(t.type as Token['type']) ? (t.type as Token['type']) : 'enemy'
+  const preset = TOKEN_PRESETS[type]
+  return {
+    ...t,
+    id: typeof t.id === 'string' && t.id ? t.id : uid(),
+    label: typeof t.label === 'string' ? t.label : '',
+    x: Number.isFinite(t.x) ? (t.x as number) : 0,
+    y: Number.isFinite(t.y) ? (t.y as number) : 0,
+    color: typeof t.color === 'string' && t.color ? t.color : preset.color,
+    emoji: typeof t.emoji === 'string' && t.emoji ? t.emoji : preset.emoji,
+    size: Number.isFinite(t.size) && (t.size as number) > 0 ? (t.size as number) : 1,
+    type,
+  }
+}
+
+/** 把任意旧形状的单张地图规整为当前 BattleMap 形状（缺字段填默认，tokens 逐个规整）。 */
+function normalizeMap(raw: unknown): BattleMap {
+  const m = (raw ?? {}) as Partial<BattleMap>
+  const tokens = Array.isArray(m.tokens) ? m.tokens.map(normalizeToken) : []
+  return {
+    ...m,
+    id: typeof m.id === 'string' && m.id ? m.id : uid(),
+    name: typeof m.name === 'string' ? m.name : '未命名地图',
+    width: Number.isFinite(m.width) ? (m.width as number) : 0,
+    height: Number.isFinite(m.height) ? (m.height as number) : 0,
+    gridSize: Number.isFinite(m.gridSize) && (m.gridSize as number) > 0 ? (m.gridSize as number) : 70,
+    gridOffsetX: Number.isFinite(m.gridOffsetX) ? (m.gridOffsetX as number) : 0,
+    gridOffsetY: Number.isFinite(m.gridOffsetY) ? (m.gridOffsetY as number) : 0,
+    showGrid: typeof m.showGrid === 'boolean' ? m.showGrid : true,
+    tokens,
+  }
+}
+
+interface PersistedMapState {
+  maps?: unknown
+  selectedId?: unknown
+}
+
+/**
+ * [T10/AC3] 纯函数：把任意持久化快照（含 version 0 = 无版本的旧形状）迁移到当前形状。
+ * 单独导出以便 T13 在不挂载组件、不碰 localStorage 的前提下单测。
+ * 任何旧 `stars-maps` blob 都应被这里规整为可直接渲染、不崩溃的当前 MapState。
+ */
+export function migrateMapsState(persisted: unknown): Pick<MapState, 'maps' | 'selectedId'> {
+  const p = (persisted ?? {}) as PersistedMapState
+  const maps = Array.isArray(p.maps) ? p.maps.map(normalizeMap) : []
+  const selectedId =
+    typeof p.selectedId === 'string' && maps.some((m) => m.id === p.selectedId)
+      ? (p.selectedId as string)
+      : (maps[0]?.id ?? null)
+  return { maps, selectedId }
+}
+
+/**
+ * [T10/AC1 · E4] 角色 → token.hp 单向镜像的唯一真相源。
+ * `Character.currentHp` 是关联 token 血量的权威；token.hp 只是它的镜像（玩家端合并/阵亡判定用）。
+ * 所有改血路径（普通伤害 / DOT 每回合 / 静水回血 / 魔法浪涌）改完 character 后，
+ * 都用本 helper 算出要写回 token 的 patch，保证 `token.hp === character.currentHp`、不被任何路径绕过。
+ * 纯函数，便于单测：post-change 断言 patch.hp === character.currentHp。
+ */
+export function characterHpTokenPatch(char: {
+  currentHp: number
+  maxHp: number
+}): Pick<Token, 'hp' | 'maxHp'> {
+  return { hp: char.currentHp, maxHp: char.maxHp }
+}
+
 const TOKEN_PRESETS = {
   player: { color: '#34d399', emoji: '🛡️' },
   enemy: { color: '#f87171', emoji: '👹' },
@@ -361,6 +441,11 @@ export const useMapStore = create<MapState>()(
         publishMapsState(get())
       },
     }),
-    { name: 'stars-maps' },
+    {
+      name: 'stars-maps',
+      version: MAPS_PERSIST_VERSION,
+      // [T10/AC3 · E10] 旧形状（version 0 = 此前无版本）经此迁移到当前形状，避免渲染期崩溃。
+      migrate: (persisted) => migrateMapsState(persisted) as MapState,
+    },
   ),
 )
