@@ -358,6 +358,13 @@ const NO_MOVE_STATUS_LABEL = '无法移动'
 
 const TOKEN_MOVE_MS = Math.ceil(TOKEN_MOVE_DURATION_S * 1000) + 80
 const DICE_ROLL_MS = 3200
+// [T2] reentrancy guard window: blocks a second initiative advance within this
+// window of another (manual + timer, or two death-skip effects firing). Mirrors
+// the previously-inline 350ms in advanceInitiative.
+const ADVANCE_GUARD_MS = 350
+// [T2/A6] bounded fallback so a superseded death dice-overlay (no onDone) can't
+// stall combat-end forever. Must be >= the longest dice overlay visible window.
+const DEATH_KEY_WATCHDOG_MS = 5000
 
 const SINGLE_TARGET_RANGE_FEET: Record<string, number> = {
   basicShot: 90,
@@ -1912,11 +1919,20 @@ export default function MapsPage() {
     const key = `${tokenId}:${charId ?? ''}`
     if (pendingDeathKeysRef.current.has(key)) return
     pendingDeathKeysRef.current.add(key)
-    afterRollCallbacksRef.current.push(() => {
+    // [T2/A6] Clearing was gated solely on a future DiceRollOverlay onDone. If that
+    // overlay is superseded by another roll (or never completes), the key was never
+    // cleared and tryEndCombatIfNeeded() returned false forever — combat could not end
+    // even with everyone dead. resolve() is idempotent (clear-once via Set membership),
+    // so whichever fires first — onDone or the watchdog — wins and the other no-ops.
+    const resolve = () => {
+      if (!pendingDeathKeysRef.current.has(key)) return
       pendingDeathKeysRef.current.delete(key)
       clearStatusesOnDeath(tokenId, charId)
       tryEndCombatIfNeeded()
-    })
+    }
+    afterRollCallbacksRef.current.push(resolve)
+    const watchdog = window.setTimeout(resolve, DEATH_KEY_WATCHDOG_MS)
+    enemyTurnTimersRef.current.push(watchdog)
   }
 
   type KnockbackPending = {
@@ -4200,6 +4216,14 @@ export default function MapsPage() {
     enemyTurnTimersRef.current = []
   }
 
+  // [T2/A8] Previously enemy-turn timers were only cleared in startCombat/endCombat,
+  // so switching maps mid-enemy-turn left old timers firing against the new map's
+  // initiativeOrderRef (cross-map pollution), and unmount leaked them. This cleanup
+  // clears the pending timer chain whenever the active map changes or the page unmounts.
+  useEffect(() => {
+    return () => clearEnemyTurnTimers()
+  }, [activeMap?.id])
+
   const clearCombatMessageQueues = async (
     mapId: string,
     options: { clearCombatLog?: boolean; combatId?: string } = {},
@@ -4932,8 +4956,14 @@ export default function MapsPage() {
   const scheduleEnemyTurn = async (enemy: Token) => {
     if (!activeMap) return
     const enemyTurnKey = `${round}-${initiativeIndex}-${enemy.id}`
+    // [T2/A7] Capture the round this turn was scheduled in. A long second-strike timer
+    // (DICE_ROLL_MS + 5000) can outlive nextRound(); without this check a stale strike
+    // that fires after the round wrapped to index 0 onto the SAME enemy token would pass
+    // the token-identity check and double-advance. (nextRound() also clears pending timers.)
+    const scheduledRound = roundRef.current
     const isStillEnemyTurn = () => {
       if (!combatActive) return false
+      if (roundRef.current !== scheduledRound) return false
       const current = initiativeOrderRef.current[initiativeIndexRef.current]
       return current?.tokenId === enemy.id
     }
@@ -4956,7 +4986,8 @@ export default function MapsPage() {
       const current = initiativeOrderRef.current[initiativeIndexRef.current]
       if (!current || current.tokenId !== enemy.id) return
       if (!enemyAppliedKeysRef.current.has(enemyTurnKey)) return
-      advanceInitiativeCore()
+      if (roundRef.current !== scheduledRound) return
+      requestAdvance()
     }
     const startingAp = getEnemyApState(enemy.id).current
     if (startingAp <= 0) {
@@ -5186,8 +5217,18 @@ export default function MapsPage() {
     const idx = initiativeIndexRef.current
     const current = order[idx]
     if (!current) {
+      // [T2/A11] Index points past/at a hole. Reset to 0, but if entry 0 already
+      // acted this round (its dedupe key is present), force one guarded advance so
+      // the queue cannot stall at index 0 instead of silently parking.
       setInitiativeIndex(0)
       initiativeIndexRef.current = 0
+      const head = order[0]
+      if (head) {
+        const headKey = `${roundRef.current}-0-${head.tokenId}`
+        if (enemyAppliedKeysRef.current.has(headKey)) {
+          window.setTimeout(() => requestAdvance(), 0)
+        }
+      }
       return
     }
 
@@ -5198,13 +5239,15 @@ export default function MapsPage() {
       const entry = order[next]
       const tok = activeMap?.tokens.find((t) => t.id === entry.tokenId)
       if (!tok) {
-        setInitiativeOrder((o) => {
-          const pruned = pruneInitiativeForToken(o, idx, entry.tokenId)
-          initiativeIndexRef.current = pruned.index
-          initiativeOrderRef.current = pruned.order
-          setInitiativeIndex(pruned.index)
-          return pruned.order
-        })
+        // [T2/A9] Compute the prune first, then write refs + state at top level —
+        // doing ref side-effects INSIDE a setInitiativeOrder updater double-fires
+        // under React18/StrictMode and desyncs initiativeIndexRef from state.
+        const pruned = pruneInitiativeForToken(initiativeOrderRef.current, idx, entry.tokenId)
+        initiativeIndexRef.current = pruned.index
+        initiativeOrderRef.current = pruned.order
+        setInitiativeOrder(pruned.order)
+        setInitiativeIndex(pruned.index)
+        // recursive continuation of the in-progress advance (exempt from the guard)
         window.setTimeout(() => advanceInitiativeCore(), 0)
         return
       }
@@ -5235,14 +5278,28 @@ export default function MapsPage() {
     }
   }
 
-  const advanceInitiative = () => {
-    if (isEnemyTurn) return
+  // [T2/A10/A12] Single reentrancy-guarded entry point for ALL automatic advances
+  // (death-skip effects, prune timers, enemy-turn completion, npc auto-skip in T1).
+  // Previously advancingTurnRef only protected the manual wrapper below, so a manual
+  // advance racing a timer — or two death-skip effects — could run advanceInitiativeCore
+  // concurrently and skip/repeat a turn. Two advances within ADVANCE_GUARD_MS now collapse
+  // to one. The recursive prune-continuation in advanceInitiativeCore calls Core directly
+  // (it is the continuation of an advance already holding the guard), and is exempt.
+  const requestAdvance = () => {
     if (advancingTurnRef.current) return
     advancingTurnRef.current = true
-    advanceInitiativeCore()
-    window.setTimeout(() => {
-      advancingTurnRef.current = false
-    }, 350)
+    try {
+      advanceInitiativeCore()
+    } finally {
+      window.setTimeout(() => {
+        advancingTurnRef.current = false
+      }, ADVANCE_GUARD_MS)
+    }
+  }
+
+  const advanceInitiative = () => {
+    if (isEnemyTurn) return
+    requestAdvance()
   }
 
   const acknowledgePlayerAction = (
@@ -5771,7 +5828,7 @@ export default function MapsPage() {
 
     const entry = initiativeOrder[initiativeIndex]
     if (!entry) {
-      advanceInitiativeCore()
+      requestAdvance()
       return
     }
 
@@ -5779,19 +5836,18 @@ export default function MapsPage() {
     const chars = useCharacterStore.getState().characters
 
     if (!token) {
-      setInitiativeOrder((order) => {
-        const pruned = pruneInitiativeForToken(order, initiativeIndexRef.current, entry.tokenId)
-        initiativeIndexRef.current = pruned.index
-        initiativeOrderRef.current = pruned.order
-        setInitiativeIndex(pruned.index)
-        return pruned.order
-      })
-      const timer = window.setTimeout(() => advanceInitiativeCore(), 50)
+      // [T2/A9] prune at top level, not inside the updater (StrictMode double-fire)
+      const pruned = pruneInitiativeForToken(initiativeOrderRef.current, initiativeIndexRef.current, entry.tokenId)
+      initiativeIndexRef.current = pruned.index
+      initiativeOrderRef.current = pruned.order
+      setInitiativeOrder(pruned.order)
+      setInitiativeIndex(pruned.index)
+      const timer = window.setTimeout(() => requestAdvance(), 50)
       return () => window.clearTimeout(timer)
     }
 
     if (!isTokenAlive(token, chars)) {
-      const timer = window.setTimeout(() => advanceInitiativeCore(), 50)
+      const timer = window.setTimeout(() => requestAdvance(), 50)
       return () => window.clearTimeout(timer)
     }
 
@@ -5840,7 +5896,7 @@ export default function MapsPage() {
     if (!isDM) return
     if (tryEndCombatIfNeeded()) return
     if (!isTokenAlive(currentInitiativeToken, characters)) {
-      const timer = window.setTimeout(() => advanceInitiativeCore(), 50)
+      const timer = window.setTimeout(() => requestAdvance(), 50)
       return () => window.clearTimeout(timer)
     }
   }, [combatActive, activeMap?.id, currentInitiativeToken?.id, characters, defeatedTokenIds.length, isDM])
