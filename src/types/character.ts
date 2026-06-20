@@ -180,20 +180,33 @@ export interface Character {
   visibleToPlayers: boolean // 是否对玩家公开
 }
 
-export const CONDITION_OPTIONS = [
-  '燃烧',
-  '点燃',
-  '中毒',
+// [T5/C7] Reconciled with the actually-effective set. The first group is engine-backed
+// (DOT damage, turn-skip, movement-lock, damage multiplier); 脆弱 and 无法移动 were missing
+// and are now added. The second group is cosmetic-only (no engine consequence yet) and is
+// kept — removing labels would orphan them on existing saved characters — but explicitly
+// flagged so it's clear which conditions do something mechanically.
+export const ENGINE_BACKED_CONDITIONS = [
+  '燃烧', // burning DOT
+  '点燃', // ignite DOT
+  '中毒', // poison DOT
+  '眩晕', // stun -> skips turn
+  '束缚', // restrained -> movement lock
+  '无法移动', // no-move -> movement lock
+  '脆弱', // vulnerable -> +25% damage taken
+] as const
+
+/** Cosmetic-only — display label, no engine effect (yet). */
+export const COSMETIC_CONDITIONS = [
   '恐慌',
   '魅惑',
   '目盲',
   '耳聋',
   '惊惧',
-  '束缚',
   '倒地',
   '麻痹',
   '震慑',
-  '眩晕',
   '昏迷',
   '隐形',
-]
+] as const
+
+export const CONDITION_OPTIONS = [...ENGINE_BACKED_CONDITIONS, ...COSMETIC_CONDITIONS]

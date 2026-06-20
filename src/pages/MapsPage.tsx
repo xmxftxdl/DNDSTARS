@@ -139,6 +139,13 @@ import { enemyTemplateToTokenPatch, type EnemyTemplate } from '../lib/enemyPool'
 import { IGNITE_STATUS_LABEL } from '../lib/ignite'
 import { dotDamageFor } from '../lib/statusDamage'
 import {
+  BURNING_STATUS_LABEL as CANON_BURNING_LABEL,
+  POISON_STATUS_LABEL as CANON_POISON_LABEL,
+  RESTRAINED_STATUS_LABEL as CANON_RESTRAINED_LABEL,
+  VULNERABLE_STATUS_LABEL as CANON_VULNERABLE_LABEL,
+  NO_MOVE_STATUS_LABEL as CANON_NO_MOVE_LABEL,
+} from '../lib/tokenStatus'
+import {
   formatKnockbackSaveLabel,
   getTokenAbilityMod,
   KNOCKBACK_DEFAULT_TURNS,
@@ -352,10 +359,15 @@ type CombatLogEntry = {
   time: string
 }
 
-const STATUS_LABEL: Record<StatusType, string> = { burning: '燃烧', poison: '中毒' }
-const RESTRAINED_STATUS_LABEL = '束缚'
-const VULNERABLE_STATUS_LABEL = '脆弱'
-const NO_MOVE_STATUS_LABEL = '无法移动'
+// [T5/C6] alias the canonical labels from tokenStatus.ts (single source) — these consts
+// keep their names so the ~20 reference sites are unchanged, but the literals live in one place.
+const STATUS_LABEL: Record<StatusType, string> = {
+  burning: CANON_BURNING_LABEL,
+  poison: CANON_POISON_LABEL,
+}
+const RESTRAINED_STATUS_LABEL = CANON_RESTRAINED_LABEL
+const VULNERABLE_STATUS_LABEL = CANON_VULNERABLE_LABEL
+const NO_MOVE_STATUS_LABEL = CANON_NO_MOVE_LABEL
 
 const TOKEN_MOVE_MS = Math.ceil(TOKEN_MOVE_DURATION_S * 1000) + 80
 const DICE_ROLL_MS = 3200
