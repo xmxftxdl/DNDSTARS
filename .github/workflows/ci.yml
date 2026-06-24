@@ -1,0 +1,32 @@
+# [T-P1-422/AC1·AC2] CI-safe gate: type-check, unit tests, and an eslint RATCHET.
+# Deliberately CI-safe ONLY: NO two/three-server stack, NO local Qwen, NO Playwright e2e.
+# e2e (incl. the ~38% flaky-by-design dice specs) is local-soak-only — see docs/verification-boundary.md.
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install (clean, lockfile-pinned)
+        run: npm ci
+
+      - name: Type-check (tsc -b)
+        run: npx tsc -b
+
+      - name: Unit tests (vitest, environment:node, no external deps)
+        run: npx vitest run
+
+      - name: ESLint ratchet (no-new-errors vs .eslint-ratchet.json)
+        run: npm run lint:ratchet

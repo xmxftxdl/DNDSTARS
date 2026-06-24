@@ -7,7 +7,9 @@ function sharedSecretHeader(): Record<string, string> {
   return secret ? { 'X-Stars-Secret': secret } : {}
 }
 
-function configuredApiBases(): string[] | null {
+// [T-P1-422/AC4] exported for the client-sync-layer unit test (dedup/trim/empty-filter of the
+// configured base list — the routing core of read/double-send-write/single-canonical-event).
+export function configuredApiBases(): string[] | null {
   const configured = import.meta.env.VITE_SHARED_API_BASES as string | undefined
   if (configured) {
     return configured
@@ -37,7 +39,9 @@ function sharedApiCandidates(): string[] {
   return [defaultDmApiBase(), sameOriginApiBase()].filter((value, index, all) => all.indexOf(value) === index)
 }
 
-function sharedWriteApiCandidates(): string[] {
+// [T-P1-422/AC4] state/image WRITES double-send to ALL configured bases (file-backed, idempotent —
+// each process writes the same shared file root). Contrast sharedEventApiCandidates (single canonical).
+export function sharedWriteApiCandidates(): string[] {
   const configured = configuredApiBases()
   if (configured) return configured
   return [defaultDmApiBase()]
