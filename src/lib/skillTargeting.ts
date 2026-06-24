@@ -62,12 +62,6 @@ export function getSkillAoeTargeting(skill: CombatSkill): SkillAoeTargeting | nu
   )
 }
 
-/** @deprecated 使用 getSkillAoeTargeting */
-export function getCircleAoeTargeting(skill: CombatSkill): CircleAoeTargeting | null {
-  const aoe = getSkillAoeTargeting(skill)
-  return aoe?.shape === 'circle' ? aoe : null
-}
-
 export function feetToRadiusCells(feet: number): number {
   return feetToMovementCells(feet)
 }
@@ -287,15 +281,6 @@ export function canPlaceAoe(
       if (aoe.placeRangeFeet == null) return true
       return cellDistance(casterCell, anchorCell) <= feetToRadiusCells(aoe.placeRangeFeet)
   }
-}
-
-/** @deprecated 使用 canPlaceAoe */
-export function canPlaceCircleCenter(
-  casterCell: GridCell,
-  centerCell: GridCell,
-  aoe: CircleAoeTargeting,
-): boolean {
-  return canPlaceAoe(aoe, casterCell, centerCell)
 }
 
 export function tokensInCells(map: BattleMap, tokens: Token[], cells: GridCell[]): Token[] {

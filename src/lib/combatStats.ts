@@ -268,15 +268,6 @@ export function applyAttackDefenseDamageModifier(
   }
 }
 
-/** @deprecated 使用 applyAttackDefenseDamageModifier */
-export function applyDefenseReduction(
-  amount: number,
-  target: Character,
-  type: DamageReductionType,
-): number {
-  return applyAttackDefenseDamageModifier(amount, undefined, characterToCombatInput(target), type).damage
-}
-
 export function resolveAttackDamageFromInput(
   input: CombatStatInput,
   skill: CombatSkill,

@@ -260,8 +260,8 @@ export default function MapsPage() {
   const resetCombatCooldowns = useCharacterStore((s) => s.resetCombatCooldowns)
   const beginTurn = useCharacterStore((s) => s.beginTurn)
   const endTurn = useCharacterStore((s) => s.endTurn)
-  const useSkillStore = useCharacterStore((s) => s.useSkill)
-  const useClassFeature = useCharacterStore((s) => s.useClassFeature)
+  const invokeSkill = useCharacterStore((s) => s.invokeSkill)
+  const activateClassFeature = useCharacterStore((s) => s.activateClassFeature)
   const spendQi = useCharacterStore((s) => s.spendQi)
   const damageChar = useCharacterStore((s) => s.damage)
   const notifyCombatMove = useCharacterStore((s) => s.notifyCombatMove)
@@ -605,7 +605,7 @@ export default function MapsPage() {
   const consumeGaleComboReady = (characterId: string, actionLabel: string) => {
     const latest = useCharacterStore.getState().characters.find((c) => c.id === characterId)
     if (!latest?.combatBuffs?.galeComboReady) return false
-    useClassFeature(characterId, 'galeCombo')
+    activateClassFeature(characterId, 'galeCombo')
     updateChar(characterId, {
       combatBuffs: { ...latest.combatBuffs, galeComboReady: undefined },
     })
@@ -3037,12 +3037,12 @@ export default function MapsPage() {
       }
     }
 
-    if (doubleArrow && hit) useClassFeature(casterId, 'doubleArrow')
+    if (doubleArrow && hit) activateClassFeature(casterId, 'doubleArrow')
 
     if (caster) {
       const buffPatch: Partial<NonNullable<Character['combatBuffs']>> = {}
       if (caster.combatBuffs?.preciseStrikeReady && hit) {
-        useClassFeature(casterId, 'preciseStrike')
+        activateClassFeature(casterId, 'preciseStrike')
         buffPatch.preciseStrikeReady = undefined
       }
       if (caster.combatBuffs?.calmSpiritCritBonusPercent) {
@@ -3526,7 +3526,7 @@ export default function MapsPage() {
         const splash = Math.floor(total / 2)
         const behindTargets = findArmorPiercingTargets(casterToken, token, splash)
         if (behindTargets.length > 0 && splash > 0) {
-          useClassFeature(casterId, 'armorPiercingArrow')
+          activateClassFeature(casterId, 'armorPiercingArrow')
           for (const behind of behindTargets) {
             await applyDamageToToken(behind, splash, { caster })
           }
@@ -3544,7 +3544,7 @@ export default function MapsPage() {
 
     if (!opts?.skipUseSkill) {
       const waiveAp = !!attackTargeting.waiveAp || !!caster?.combatBuffs?.galeComboReady
-      useSkillStore(casterId, skill.id, waiveAp ? { waiveAp: true } : undefined)
+      invokeSkill(casterId, skill.id, waiveAp ? { waiveAp: true } : undefined)
       pushApLog(caster, waiveAp ? 0 : skill.apCost, `使用 ${skill.name}`, `目标 ${token.label}`)
       applySkillCooldownReduction(casterId, skill.id, selfCooldownReduction)
       if (waiveAp && caster?.combatBuffs?.galeComboReady) {
@@ -3636,7 +3636,7 @@ export default function MapsPage() {
     const perArrowSkill: CombatSkill = { ...skill, arrowShots: 1 }
     const perArrowDiceCount = Math.max(1, attackDamageDiceCount(perArrowSkill, false))
     const damageSides = isBasicShot(perArrowSkill) ? 8 : perArrowSkill.damageSides
-    useSkillStore(caster.id, skill.id, waiveAp ? { waiveAp: true } : undefined)
+    invokeSkill(caster.id, skill.id, waiveAp ? { waiveAp: true } : undefined)
     pushApLog(caster, waiveAp ? 0 : skill.apCost, `使用 ${skill.name}`, `${targets.length} 支箭`)
     if (waiveAp && caster.combatBuffs?.galeComboReady) {
       consumeGaleComboReady(caster.id, skill.name)
@@ -3923,7 +3923,7 @@ export default function MapsPage() {
     }
 
     const waiveAp = !!aoeTargeting.waiveAp || !!caster?.combatBuffs?.galeComboReady
-    useSkillStore(casterId, skill.id, waiveAp ? { waiveAp: true } : undefined)
+    invokeSkill(casterId, skill.id, waiveAp ? { waiveAp: true } : undefined)
     pushApLog(caster, waiveAp ? 0 : skill.apCost, `释放 ${skill.name}`, `${targets.length} 名目标，覆盖 ${cells.length} 格`)
     applySkillCooldownReduction(casterId, skill.id, selfCooldownReduction)
     if (waiveAp && caster?.combatBuffs?.galeComboReady) {
@@ -4117,7 +4117,7 @@ export default function MapsPage() {
       if (!spendAP(turnCharacter.id, 1)) return
       const target = chooseEnemyTokenByPrompt('追踪箭：给一个已带狩猎印记的目标额外 +1 层印记', (t) => (t.huntingMarkStacks ?? 0) > 0)
       if (!target || !activeMap) return
-      useClassFeature(turnCharacter.id, 'trackingArrow')
+      activateClassFeature(turnCharacter.id, 'trackingArrow')
       const nextStacks = Math.min(4, (target.huntingMarkStacks ?? 0) + 1)
       updateToken(activeMap.id, target.id, { huntingMarkStacks: nextStacks })
       if (nextStacks === 4) await triggerFinaleIfReady(turnCharacter, target)
@@ -4130,7 +4130,7 @@ export default function MapsPage() {
       if (!spendAP(turnCharacter.id, 1)) return
       const target = chooseEnemyTokenByPrompt('影遁之术：消耗目标 2 层狩猎印记，本回合对其攻击 +1D6', (t) => (t.huntingMarkStacks ?? 0) >= 2)
       if (!target || !activeMap) return
-      useClassFeature(turnCharacter.id, 'shadowVeil')
+      activateClassFeature(turnCharacter.id, 'shadowVeil')
       updateToken(activeMap.id, target.id, { huntingMarkStacks: Math.max(0, (target.huntingMarkStacks ?? 0) - 2) })
       updateChar(turnCharacter.id, {
         combatBuffs: { ...turnCharacter.combatBuffs, shadowVeilTargetId: target.id },
@@ -4185,7 +4185,7 @@ export default function MapsPage() {
       }
       if (ready && !spendAP(turnCharacter.id, 2)) return
       pushApLog(turnCharacter, 2, '激活曲终', '等待下一名敌对生物狩猎印记叠至 4 层')
-      useClassFeature(turnCharacter.id, 'finale')
+      activateClassFeature(turnCharacter.id, 'finale')
       updateChar(turnCharacter.id, {
         combatBuffs: { ...turnCharacter.combatBuffs, finaleReady: true },
       })
@@ -4379,7 +4379,7 @@ export default function MapsPage() {
       const pos = snapTokenToGridCenter(point.x, point.y, agileLeapToken, activeMap)
       if (!isWithinMovementRange(center, pos, feet, activeMap)) return
       updateToken(activeMap.id, agileLeapToken.id, pos)
-      useClassFeature(agileLeapChar.id, 'agileLeap')
+      activateClassFeature(agileLeapChar.id, 'agileLeap')
       pushApLog(agileLeapChar, 0, '灵巧跳跃移动', `移动至多 ${feet} 尺`)
       updateChar(agileLeapChar.id, {
         combatBuffs: { ...agileLeapChar.combatBuffs, agileLeapMoveFeet: undefined },
@@ -4579,7 +4579,7 @@ export default function MapsPage() {
       })
       setAoeRectRotation(0)
     } else {
-      useSkillStore(activeChar.id, skill.id, waiveAp ? { waiveAp: true } : undefined)
+      invokeSkill(activeChar.id, skill.id, waiveAp ? { waiveAp: true } : undefined)
       pushApLog(activeChar, waiveAp ? 0 : skill.apCost, `使用 ${skill.name}`)
       if (waiveAp) {
         consumeGaleComboReady(activeChar.id, skill.name)
@@ -5392,7 +5392,7 @@ export default function MapsPage() {
             tone: 'violet',
           })
         ) {
-          useClassFeature(before.id, 'arcaneSurge')
+          activateClassFeature(before.id, 'arcaneSurge')
           updateChar(before.id, { currentHp: 1 })
           syncTargetHp(before.id)
           combatLabel = `${combatLabel ? `${combatLabel} · ` : ''}魔法浪涌：生命保留为 1`
@@ -6661,7 +6661,7 @@ export default function MapsPage() {
         completePlayerActionRequest(action)
         return
       }
-      const ok = useCharacterStore.getState().useQiReduceCooldown(actor.id, skill.id)
+      const ok = useCharacterStore.getState().reduceQiCooldown(actor.id, skill.id)
       if (!ok) {
         acknowledgePlayerAction(action, 'rejected', 'invalid-qi-reduce')
         completePlayerActionRequest(action)

@@ -883,7 +883,7 @@ interface CharacterState {
   longRestAll: () => void
 
   // —— 技能冷却系统 ——
-  useSkill: (charId: string, skillId: string, opts?: { waiveAp?: boolean }) => void
+  invokeSkill: (charId: string, skillId: string, opts?: { waiveAp?: boolean }) => void
   /** 战斗开始：全部技能放入 0 栏（可用），行动点回满 */
   resetCombatCooldowns: (charId: string) => void
   /** 回合开始：行动点回满，清除本回合已用标记 */
@@ -907,7 +907,7 @@ interface CharacterState {
   addTrait: (charId: string) => void
   updateTrait: (charId: string, traitId: string, patch: Partial<Trait>) => void
   removeTrait: (charId: string, traitId: string) => void
-  useClassFeature: (charId: string, key: ClassFeatureKey) => boolean
+  activateClassFeature: (charId: string, key: ClassFeatureKey) => boolean
   activateEagleEye: (charId: string) => boolean
   upgradeClassTrait: (charId: string, traitId: string) => boolean
   upgradeSkillRank: (charId: string, skillId: string) => boolean
@@ -921,7 +921,7 @@ interface CharacterState {
     opts?: { fromRemote?: boolean },
   ) => void
   spendQi: (charId: string, amount?: number) => boolean
-  useQiReduceCooldown: (charId: string, skillId: string) => boolean
+  reduceQiCooldown: (charId: string, skillId: string) => boolean
 }
 
 export const useCharacterStore = create<CharacterState>()(
@@ -1111,7 +1111,7 @@ export const useCharacterStore = create<CharacterState>()(
           saveCharacters()
         },
 
-        useSkill: (charId, skillId, opts) => {
+        invokeSkill: (charId, skillId, opts) => {
           const c = get().characters.find((x) => x.id === charId)
           const skill = c?.combatSkills.find((s) => s.id === skillId)
           if (!c || !skill) return
@@ -1329,7 +1329,7 @@ export const useCharacterStore = create<CharacterState>()(
             traits: c.traits.filter((t) => t.id !== traitId),
           })),
 
-        useClassFeature: (charId, key) => {
+        activateClassFeature: (charId, key) => {
           const c = get().characters.find((x) => x.id === charId)
           const trait = c ? findClassTrait(c, key) : undefined
           if (!trait || trait.uses <= 0) return false
@@ -1437,7 +1437,7 @@ export const useCharacterStore = create<CharacterState>()(
           return true
         },
 
-        useQiReduceCooldown: (charId, skillId) => {
+        reduceQiCooldown: (charId, skillId) => {
           const c = get().characters.find((x) => x.id === charId)
           const skill = c?.combatSkills.find((s) => s.id === skillId)
           if (!c || !skill || skill.remaining <= 0) return false

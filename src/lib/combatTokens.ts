@@ -56,11 +56,6 @@ export function checkCombatOutcome(
   return { ended: false }
 }
 
-/** @deprecated 战败 token 不再从地图移除，仅保留灰显 */
-export function shouldRemoveTokenOnDefeat(_token: Token): boolean {
-  return false
-}
-
 export function tokenHpAfterDamage(token: Token, amount: number, characters: Character[]): number {
   if (token.characterId) {
     const ch = characters.find((c) => c.id === token.characterId)

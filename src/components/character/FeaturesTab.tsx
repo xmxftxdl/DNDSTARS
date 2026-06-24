@@ -50,7 +50,7 @@ export default function FeaturesTab({
   const removeTrait = useCharacterStore((s) => s.removeTrait)
   const upgradeClassTrait = useCharacterStore((s) => s.upgradeClassTrait)
   const applyTraitChoice = useCharacterStore((s) => s.applyTraitChoice)
-  const useClassFeature = useCharacterStore((s) => s.useClassFeature)
+  const activateClassFeature = useCharacterStore((s) => s.activateClassFeature)
   const spendAP = useCharacterStore((s) => s.spendAP)
   const updateChar = useCharacterStore((s) => s.update)
   const [lastCheckLabel, setLastCheckLabel] = useState<string | null>(null)
@@ -100,7 +100,7 @@ export default function FeaturesTab({
       alert('行动点不足（需要 1 AP）')
       return
     }
-    if (!useClassFeature(charId, 'wildernessGuide')) return
+    if (!activateClassFeature(charId, 'wildernessGuide')) return
     updateChar(charId, {
       combatBuffs: { ...c.combatBuffs, wildernessGuideBoost: true },
     })
