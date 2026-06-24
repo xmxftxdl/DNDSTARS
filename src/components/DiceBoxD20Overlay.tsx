@@ -126,7 +126,7 @@ export default function DiceBoxD20Overlay({
       <iframe
         ref={iframeRef}
         title="D20 dice roller"
-        src="/dice-box-frame.html?badge=0"
+        src="/dice-box-frame.html"
         className="dice-box-d20-frame"
         style={{ '--dice-fly-x': flyX, '--dice-fly-y': flyY } as CSSProperties}
         sandbox="allow-scripts allow-same-origin"

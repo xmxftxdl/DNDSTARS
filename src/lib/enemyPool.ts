@@ -1,4 +1,4 @@
-﻿import { enemyHasDerivedCombat, getEnemyMaxHp } from './enemyCombatStats'
+import { enemyHasDerivedCombat, getEnemyMaxHp } from './enemyCombatStats'
 import {
   creatureSizeToTokenSize,
   inferCreatureSizeFromTags,

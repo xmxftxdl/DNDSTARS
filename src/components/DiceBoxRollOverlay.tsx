@@ -136,7 +136,7 @@ export default function DiceBoxRollOverlay({
       <iframe
         ref={iframeRef}
         title={`${sides}-sided dice roller`}
-        src={`/dice-box-frame.html?badge=0&sides=${iframeSides}&qty=${safeCountForFrame}`}
+        src={`/dice-box-frame.html?sides=${iframeSides}&qty=${safeCountForFrame}`}
         className="dice-box-damage-frame dice-box-roll-flight"
         style={{ '--dice-fly-x': flyX, '--dice-fly-y': flyY } as CSSProperties}
         sandbox="allow-scripts allow-same-origin"

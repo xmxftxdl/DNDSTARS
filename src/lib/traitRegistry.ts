@@ -1,4 +1,4 @@
-﻿import type { Character, Trait } from '../types/character'
+import type { Character, Trait } from '../types/character'
 import { isShadowDancer } from './characterClasses'
 import { isArcherLineClass } from './archerSkillTree'
 
