@@ -10,6 +10,19 @@
 - 骰子动画可以在玩家端或 DM 端发起，但用于结算的骰值必须进入 DM 端结算上下文，再由 DM 端广播最终状态。
 - 广播消息应携带自增 id / action id，客户端丢弃旧消息和重复消息。
 
+### 单一权威实现（T-P1-420，2026-06-23 决定 Option A）
+
+历史上存在一个**从未在生产运行**的并行权威引擎 `src/lib/headlessDmCombatEngine.ts`：279 个单测验证的是它，而真正运行的是 `MapsPage.tsx` 的 live 结算路径（`applyDamageToToken` / `applyEnemyAttack` / `planEnemyTurn` / `nextRound` / `finishEnemyAttack` 等）。测试因此对实际行为给出**虚假信心**。
+
+决定（owner xushenghui，Option A）：**删除该死引擎及其测试，以及 `combatAuthority.ts` 中仅被测试引用的 standalone 导出**（`startCombatAuthority` / `spendCharacterApAuthority` / `spendEnemyApAuthority` / `activateFeatureAuthority` / `moveCharacterAuthority` / `attackCharacterAuthority` / `applyDamageAuthority` / `resolveDodgeAuthority`）。**MapsPage live 路径是唯一权威**，覆盖通过把 live 纯核（DOT/状态/闪避判定）抽到 `lib/` 后单测保证。
+
+唯一保留的 authority 触点是 **`executeCombatMutationsAuthority`**（MapsPage 在 :884 调用），它把 hook 输出的 `CombatMutation[]` 在 DM 端一次性权威执行（spend-ap/spend-qi/spend-feature-use/damage/heal/condition/log/custom）。
+
+**状态时长叠加的唯一规则 = refresh-to-max**（再次施加取较大剩余回合，绝不硬覆盖向下）：
+- `combatTokens.statusRefreshTokenPatch`（add 分支的规范实现，`executeCombatMutationsAuthority` 的 condition-add 走它）；
+- MapsPage 内联的 `Math.max(...Turns ?? 0, n)` 与之同义；
+- 清除（remove）分支单独硬置 `undefined`（0 stays 0，不复活已清状态）。
+
 ## 战斗阶段
 
 阶段定义在 `src/lib/combatResolutionPipeline.ts`：

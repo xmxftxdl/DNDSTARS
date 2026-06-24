@@ -158,6 +158,7 @@ import {
   isTokenAlive,
   isTokenDefeated,
   pruneInitiativeForToken,
+  resolveDodgeOutcome,
   resolveEnemyAttackTokens,
   shouldApplyDotTick,
 } from '../lib/combatTokens'
@@ -2424,8 +2425,8 @@ export default function MapsPage() {
     }
     if (!spendEnemyAp(token.id, 1)) return null
     const d20 = await rollDiceBoxD20('敌人闪避 D20', token.label)
-    const total = d20 + attackBonus
-    const dodged = total < targetAc
+    // [T-P1-420/AC2] 走唯一的闪避判定纯函数（与已删 resolveDodgeAuthority 同义）。
+    const { total, dodged } = resolveDodgeOutcome(d20, attackBonus, targetAc)
     pushCombatLog(
       `${token.label} 花费 1 AP：尝试闪避 ${skill.name}。判定 ${d20}+${attackBonus}=${total} vs AC ${targetAc}，${dodged ? '闪避成功' : '闪避失败'}`,
       dodged ? 'attack' : 'turn',

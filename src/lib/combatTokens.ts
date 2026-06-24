@@ -40,6 +40,47 @@ export function resolveEnemyAttackTokens(
   }
 }
 
+// [T-P1-420/C3 · AC2] 闪避判定纯函数（re-home 自已删除的 resolveDodgeAuthority；live path MapsPage
+// 敌人闪避结算 :2427-2428 现统一走它）。命中总值 = d20 + attackBonus；total < AC ⇒ 闪避成功不吃伤害。
+export function resolveDodgeOutcome(
+  d20: number,
+  attackBonus: number,
+  targetAc: number,
+  damage = 0,
+): { total: number; dodged: boolean; damageApplied: number } {
+  const total = d20 + attackBonus
+  const dodged = total < targetAc
+  return { total, dodged, damageApplied: dodged ? 0 : damage }
+}
+
+// [T-P1-420/AC3] 状态时长叠加的唯一规范规则：refresh-to-max（再次施加取较大剩余回合，绝不 OVERWRITE）。
+// 这是三处分歧（已删 headless 引擎硬覆盖 / MapsPage 内联 Math.max / combatAuthority conditionTokenPatch
+// 硬覆盖）统一后的单一规则；combatAuthority 的 add 分支现走本函数，MapsPage 内联本就是 Math.max 同义。
+// 注意：仅用于「施加(add)」分支；清除(remove)分支单独硬置 0/undefined，不得用 max 复活已清状态。
+const CONDITION_STATUS_FIELD: Record<
+  string,
+  'burningTurns' | 'igniteTurns' | 'poisonTurns' | 'stunTurns' | 'restrainedTurns' | 'vulnerableTurns' | 'noMoveTurns'
+> = {
+  燃烧: 'burningTurns',
+  点燃: 'igniteTurns',
+  中毒: 'poisonTurns',
+  眩晕: 'stunTurns',
+  束缚: 'restrainedTurns',
+  脆弱: 'vulnerableTurns',
+  无法移动: 'noMoveTurns',
+}
+
+export function statusRefreshTokenPatch(token: Token, condition: string, turns?: number): Partial<Token> {
+  const field = CONDITION_STATUS_FIELD[condition]
+  if (!field) return {}
+  const incoming = turns && turns > 0 ? turns : 0
+  if (incoming <= 0) return {}
+  const current = (token[field] as number | undefined) ?? 0
+  const patch: Partial<Token> = {}
+  patch[field] = Math.max(current, incoming)
+  return patch
+}
+
 // [T-P1-418/C6-DOT · AC5·AC6] 本回合是否对该 token 施加一次持续伤害（DOT）tick。
 // 仅当 dot>0 且该 token 在 tick 进入时仍存活时为真：0 血但残留 burningTurns 的死亡单位被跳过，
 // 避免对已死单位二次 applyDamageToToken → 重复触发死亡副作用/日志。回合进入时存活、且本 tick 致死的
