@@ -27,6 +27,27 @@ export function isTokenAlive(token: Token, characters: Character[]): boolean {
   return true
 }
 
+// [T-P1-418/C4 · AC2] 敌人攻击的「攻击者/目标」解析纯函数：结果完全由传入的 token 列表决定。
+// finishEnemyAttack 在突变点用 useMapStore.getState() 取 LIVE 列表再调用本函数，故能对当前棋面
+// （而非闭包里捕获的陈旧 activeMap 快照）解算。把解析抽成纯函数即为 live-vs-stale 的可测 oracle。
+export function resolveEnemyAttackTokens(
+  tokens: Token[],
+  result: { attackerTokenId?: string; targetTokenId?: string },
+): { actorToken: Token | undefined; targetToken: Token | undefined } {
+  return {
+    actorToken: result.attackerTokenId ? tokens.find((t) => t.id === result.attackerTokenId) : undefined,
+    targetToken: result.targetTokenId ? tokens.find((t) => t.id === result.targetTokenId) : undefined,
+  }
+}
+
+// [T-P1-418/C6-DOT · AC5·AC6] 本回合是否对该 token 施加一次持续伤害（DOT）tick。
+// 仅当 dot>0 且该 token 在 tick 进入时仍存活时为真：0 血但残留 burningTurns 的死亡单位被跳过，
+// 避免对已死单位二次 applyDamageToToken → 重复触发死亡副作用/日志。回合进入时存活、且本 tick 致死的
+// 单位仍返回 true（在循环里每 token 仅判一次 ⇒ 死亡处理恰好一次）。状态计数清除与此判定无关，照常进行。
+export function shouldApplyDotTick(token: Token, characters: Character[], dot: number): boolean {
+  return dot > 0 && isTokenAlive(token, characters)
+}
+
 /** 战斗阵营：玩家与 NPC 为友方，敌人为敌方 */
 export function getTokenCombatSide(token: Token): 'ally' | 'enemy' | 'neutral' {
   if (token.type === 'obstacle') return 'neutral'
