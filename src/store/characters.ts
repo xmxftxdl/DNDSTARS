@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import { loadSharedResource, publishSharedEvent, saveSharedResource, subscribeSharedEvent } from '../lib/sharedApi'
 import { isPlayerPort, modeFromPort } from '../lib/appMode'
+import { decideApply, type MonotonicState } from '../lib/monotonicGuard'
 import {
   canLearnSkill,
   canUpgradeSkillRank,
@@ -179,44 +180,17 @@ function applyStillWatersHealingOnBreathShift(before: Character, after: Characte
   return { ...after, currentHp: Math.min(after.maxHp, after.currentHp + heal) }
 }
 
-export function mergePlayerWritableCharacter(local: Character, shared: Character): Character {
-  const localTraits = local.traits ?? []
-  const sharedTraits = shared.traits ?? []
-  const localSkills = local.combatSkills ?? []
-  const sharedSkills = shared.combatSkills ?? []
-  return {
-    ...local,
-    currentHp: shared.currentHp,
-    maxHp: shared.maxHp,
-    tempHp: shared.tempHp,
-    conditions: shared.conditions,
-    actionPoints: shared.actionPoints,
-    currentAP: shared.currentAP,
-    qi: shared.qi,
-    combatBuffs: shared.combatBuffs ? { ...shared.combatBuffs } : undefined,
-    traits: localTraits.map((trait) => {
-      const sharedTrait =
-        sharedTraits.find((item) => item.id === trait.id) ??
-        (trait.featureKey ? sharedTraits.find((item) => item.featureKey === trait.featureKey) : undefined)
-      if (!sharedTrait) return trait
-      return {
-        ...trait,
-        uses: sharedTrait.uses,
-        maxUses: sharedTrait.maxUses,
-      }
-    }),
-    combatSkills: localSkills.map((skill) => {
-      const sharedSkill =
-        sharedSkills.find((item) => item.id === skill.id) ??
-        (skill.skillTreeId ? sharedSkills.find((item) => item.skillTreeId === skill.skillTreeId) : undefined)
-      if (!sharedSkill) return skill
-      return {
-        ...skill,
-        remaining: sharedSkill.remaining,
-        usedThisTurn: sharedSkill.usedThisTurn,
-      }
-    }),
-  }
+// [T-P1-417/AC3 · C6 fix · Option B — DM 是战斗权威端]
+// 玩家写盘前，对「已同时存在于 shared」的角色（player-only 新建角色在调用方 `if (!sharedChar) return ch`
+// 处已先行返回本地副本，不进本函数），一律采用 DM 的 shared 文档：
+//   - 战斗状态（currentHp/maxHp/tempHp/conditions/actionPoints/currentAP/qi/combatBuffs、
+//     各 trait 的 uses/maxUses、各 combatSkill 的 remaining/usedThisTurn）— 一直就取 shared（DM 权威，不变）；
+//   - 基础属性（name/notes/level/AC/abilities/equipment 等非战斗字段）— 此前 base=...local 会让玩家的
+//     旧快照把 DM 改过的值冲掉（C1/C6 数据丢失：DM 编辑静默消失），现改为同样取 shared。
+// 因此玩家端对已知角色不再越权写入任何字段；玩家的乐观本地改动只有在 DM 确认并经 loadShared 广播后才落地。
+// player-writable 白名单在 DM-authority 模型下实际为空，故直接返回 shared 副本。
+export function mergePlayerWritableCharacter(_local: Character, shared: Character): Character {
+  return { ...shared }
 }
 
 export function mergeCharactersForSharedSave(
@@ -883,7 +857,7 @@ interface CharacterState {
   longRestAll: () => void
 
   // —— 技能冷却系统 ——
-  useSkill: (charId: string, skillId: string, opts?: { waiveAp?: boolean }) => void
+  invokeSkill: (charId: string, skillId: string, opts?: { waiveAp?: boolean }) => void
   /** 战斗开始：全部技能放入 0 栏（可用），行动点回满 */
   resetCombatCooldowns: (charId: string) => void
   /** 回合开始：行动点回满，清除本回合已用标记 */
@@ -907,7 +881,7 @@ interface CharacterState {
   addTrait: (charId: string) => void
   updateTrait: (charId: string, traitId: string, patch: Partial<Trait>) => void
   removeTrait: (charId: string, traitId: string) => void
-  useClassFeature: (charId: string, key: ClassFeatureKey) => boolean
+  activateClassFeature: (charId: string, key: ClassFeatureKey) => boolean
   activateEagleEye: (charId: string) => boolean
   upgradeClassTrait: (charId: string, traitId: string) => boolean
   upgradeSkillRank: (charId: string, skillId: string) => boolean
@@ -921,28 +895,32 @@ interface CharacterState {
     opts?: { fromRemote?: boolean },
   ) => void
   spendQi: (charId: string, amount?: number) => boolean
-  useQiReduceCooldown: (charId: string, skillId: string) => boolean
+  reduceQiCooldown: (charId: string, skillId: string) => boolean
 }
 
 export const useCharacterStore = create<CharacterState>()(
   persist(
     (set, get) => {
-      const publishCharactersSnapshot = async (updatedAt: number = Date.now()) => {
+      const publishCharactersSnapshot = async (updatedAt?: number) => {
         const seq = ++characterSaveSeq
         const characters = get().characters
         const selectedId = characters.some((ch) => ch.id === get().selectedId)
           ? get().selectedId
           : (characters[0]?.id ?? null)
+        // [T-P1-417/AC1] 单调时钟（镜像 maps.ts:84）：相对「最近观测到的 shared 时钟」与「上次本地写时钟」
+        // 严格递增，避免基于旧快照计算出的写在服务器 freshness guard 下凭裸时间戳赢过 DM 的较新写。
+        const stamp = Math.max(updatedAt ?? Date.now(), lastAppliedCharactersUpdatedAt + 1, lastLocalCharactersWriteAt + 1)
         const payload: SharedCharactersState = {
           characters,
           selectedId,
-          updatedAt,
+          updatedAt: stamp,
         }
-        lastLocalCharactersWriteAt = payload.updatedAt ?? Date.now()
+        lastLocalCharactersWriteAt = stamp
+        lastAppliedCharactersUpdatedAt = stamp
         lastSharedCharactersSnapshot = JSON.stringify(payload)
         await saveSharedResource('characters', payload)
-        if (seq !== characterSaveSeq) return updatedAt
-        return updatedAt
+        if (seq !== characterSaveSeq) return stamp
+        return stamp
       }
 
       const saveCharacters = () => {
@@ -968,13 +946,16 @@ export const useCharacterStore = create<CharacterState>()(
           const selectedId = characters.some((ch) => ch.id === get().selectedId)
             ? get().selectedId
             : (characters[0]?.id ?? null)
+          // [T-P1-417/AC1] 与 publishCharactersSnapshot 同一单调时钟（镜像 maps.ts:84）。
+          const stamp = Math.max(Date.now(), lastAppliedCharactersUpdatedAt + 1, lastLocalCharactersWriteAt + 1)
           const payload: SharedCharactersState = {
             characters,
             selectedId,
-            updatedAt: Date.now(),
+            updatedAt: stamp,
           }
           if (seq !== characterSaveSeq) return
-          lastLocalCharactersWriteAt = payload.updatedAt ?? Date.now()
+          lastLocalCharactersWriteAt = stamp
+          lastAppliedCharactersUpdatedAt = stamp
           lastSharedCharactersSnapshot = JSON.stringify(payload)
           await saveSharedResource('characters', payload)
         }
@@ -1001,21 +982,17 @@ export const useCharacterStore = create<CharacterState>()(
             saveCharacters()
             return
           }
-          if (!isPlayerPort() && (shared.updatedAt ?? 0) < lastLocalCharactersWriteAt) {
-            console.info('[characters-shared-stale-ignored]', {
-              sharedUpdatedAt: shared.updatedAt ?? 0,
-              lastLocalCharactersWriteAt,
-            })
-            return
+          // [T-P1-417/AC4 · E6] DM 与玩家两端走同一纯 guard（decideApply，镜像 maps.ts:289-300）。
+          // 此前 !isPlayerPort() 才做 stale 检查是不对称 bug：玩家端裸接受任意顺序的快照，乱序/陈旧写会
+          // 把玩家端状态回退。现在两端统一：严格更旧 ⇒ 丢弃；内容未变 ⇒ 短路；否则 apply。
+          const prevGuard: MonotonicState = {
+            lastUpdatedAt: lastAppliedCharactersUpdatedAt,
+            lastSnapshot: lastSharedCharactersSnapshot,
           }
-          // [T11/AC6 · E6] 单调 guard：严格更旧的乱序快照丢弃（DM 与玩家两端都生效）。
-          const incomingUpdatedAt = shared.updatedAt ?? 0
-          if (incomingUpdatedAt < lastAppliedCharactersUpdatedAt) return
-          const snapshot = JSON.stringify(shared)
-          // equality 短路只在内容真正未变时触发，不压制更新的 apply。
-          if (snapshot === lastSharedCharactersSnapshot) return
-          lastAppliedCharactersUpdatedAt = incomingUpdatedAt
-          lastSharedCharactersSnapshot = snapshot
+          const decision = decideApply(prevGuard, shared.updatedAt ?? 0, JSON.stringify(shared))
+          if (!decision.apply) return
+          lastAppliedCharactersUpdatedAt = decision.next.lastUpdatedAt
+          lastSharedCharactersSnapshot = decision.next.lastSnapshot
           // [T10/AC2 · E11] 先剔除仍被墓碑标记的角色：对端一份仍含已删角色的全量快照
           // 不得复活它。墓碑过期后（GC）该过滤自动失效，被删 id 可被复用。
           const sharedCharacters = filterTombstonedCharacters(shared.characters).map(finalizeCharacter)
@@ -1111,7 +1088,7 @@ export const useCharacterStore = create<CharacterState>()(
           saveCharacters()
         },
 
-        useSkill: (charId, skillId, opts) => {
+        invokeSkill: (charId, skillId, opts) => {
           const c = get().characters.find((x) => x.id === charId)
           const skill = c?.combatSkills.find((s) => s.id === skillId)
           if (!c || !skill) return
@@ -1329,7 +1306,7 @@ export const useCharacterStore = create<CharacterState>()(
             traits: c.traits.filter((t) => t.id !== traitId),
           })),
 
-        useClassFeature: (charId, key) => {
+        activateClassFeature: (charId, key) => {
           const c = get().characters.find((x) => x.id === charId)
           const trait = c ? findClassTrait(c, key) : undefined
           if (!trait || trait.uses <= 0) return false
@@ -1437,7 +1414,7 @@ export const useCharacterStore = create<CharacterState>()(
           return true
         },
 
-        useQiReduceCooldown: (charId, skillId) => {
+        reduceQiCooldown: (charId, skillId) => {
           const c = get().characters.find((x) => x.id === charId)
           const skill = c?.combatSkills.find((s) => s.id === skillId)
           if (!c || !skill || skill.remaining <= 0) return false

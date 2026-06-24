@@ -49,10 +49,10 @@ export default function SkillBar({
   canAct?: boolean
 }) {
   const character = useCharacterStore((s) => s.characters.find((c) => c.id === charId))
-  const useSkill = useCharacterStore((s) => s.useSkill)
+  const invokeSkill = useCharacterStore((s) => s.invokeSkill)
   const endTurn = useCharacterStore((s) => s.endTurn)
   const reduceCooldown = useCharacterStore((s) => s.reduceCooldown)
-  const useQiReduceCooldown = useCharacterStore((s) => s.useQiReduceCooldown)
+  const reduceQiCooldown = useCharacterStore((s) => s.reduceQiCooldown)
   const addSkill = useCharacterStore((s) => s.addSkill)
   const updateSkill = useCharacterStore((s) => s.updateSkill)
   const removeSkill = useCharacterStore((s) => s.removeSkill)
@@ -172,7 +172,7 @@ export default function SkillBar({
                   disabledLabel={!canAct ? '未到回合' : undefined}
                   effectiveCd={effectiveCd(s)}
                   onEdit={() => setEditingId(s.id)}
-                  onUse={() => (onUseSkill ? onUseSkill(s) : useSkill(charId, s.id))}
+                  onUse={() => (onUseSkill ? onUseSkill(s) : invokeSkill(charId, s.id))}
                   onDelete={() => handleDeleteSkill(s)}
                 />
               ))}
@@ -211,7 +211,7 @@ export default function SkillBar({
                         disabledLabel={!canAct ? '未到回合' : undefined}
                         effectiveCd={effectiveCd(s)}
                         onEdit={() => setEditingId(s.id)}
-                        onUse={() => (onUseSkill ? onUseSkill(s) : useSkill(charId, s.id))}
+                        onUse={() => (onUseSkill ? onUseSkill(s) : invokeSkill(charId, s.id))}
                         onDelete={() => handleDeleteSkill(s)}
                       />
                     ) : (
@@ -222,7 +222,7 @@ export default function SkillBar({
                         canQiReduce={canAct && canSpendQi}
                         onEdit={() => setEditingId(s.id)}
                         onReduce={() => reduceCooldown(charId, s.id)}
-                        onQiReduce={() => (onQiReduceSkill ? onQiReduceSkill(s) : useQiReduceCooldown(charId, s.id))}
+                        onQiReduce={() => (onQiReduceSkill ? onQiReduceSkill(s) : reduceQiCooldown(charId, s.id))}
                         onDelete={() => handleDeleteSkill(s)}
                       />
                     ),

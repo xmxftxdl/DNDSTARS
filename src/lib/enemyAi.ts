@@ -171,7 +171,6 @@ function buildEnemyAttack(
   kind: 'melee' | 'ranged',
 ): EnemyTurnResult {
   const values: number[] = []
-  const total = 1
 
   // [T7/AC1] 标签/骰面/命中加值来自怪物的结构化主攻击（damageDice/damageType/toHit），
   // 不再硬编码全局 1d6。inferEnemyDamageDiceCount 会从 label 解析 \d+d\d+。
@@ -180,19 +179,27 @@ function buildEnemyAttack(
   let sides: number
   let diceLabel: string
   let attackBonus: number
+  let diceCount: number
 
   if (action?.damageDice) {
     const parsed = parseDamageDice(action.damageDice)
     sides = parsed.sides
     attackBonus = parsed.bonus
     diceLabel = action.damageDice
+    diceCount = parsed.count
   } else {
     // 无结构化攻击数据（理论上 post-T6 不应发生）→ 回退骰 + 敏捷加值（AC6 告警在此路径）。
     const dexBonus = enemyMeleeDexBonus(enemy)
     sides = FALLBACK_ATTACK_DICE.sides
     attackBonus = dexBonus
     diceLabel = `${FALLBACK_ATTACK_DICE.count}d${FALLBACK_ATTACK_DICE.sides}${dexBonus >= 0 ? '+' : ''}${dexBonus}`
+    diceCount = FALLBACK_ATTACK_DICE.count
   }
+
+  // [T-P2-423/AC5] 估算伤害（满额 = count*sides + bonus）；MapsPage 会按 label 重新投骰，
+  // total 仅作占位与守卫阈值（resolveEnemyDamageDice 要求 damage>0 才重投）。与 buildBreathAttack
+  // 一致，消除此前硬编码的 total=1（战斗日志曾恒显 1 点伤害）。
+  const total = Math.max(1, diceCount * sides + attackBonus)
 
   const attackName = action?.name ?? (kind === 'ranged' ? '远程' : '近战')
   const targetCharacterId = resolveTokenCharacterId(target)

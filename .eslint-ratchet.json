@@ -1,0 +1,4 @@
+{
+  "comment": "[T-P1-422/AC2] eslint error RATCHET baseline (single source of truth). CI fails only if the current error count EXCEEDS maxErrors (no-new-errors), not on a clean bar. History: 83 (pre-batch) -> 65 (T-P2-423 cleared 17 react-hooks/rules-of-hooks renames + 1 dead-export) -> 62 (T-P1-418 cleared 3 react-hooks/globals). A task that clears lint MUST decrement maxErrors here in the same change and state the new total in its PROGRESS entry (one-home ownership prevents a forgotten bump). Warnings are not gated.",
+  "maxErrors": 62
+}

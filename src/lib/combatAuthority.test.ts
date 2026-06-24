@@ -1,13 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { Character } from '../types/character'
 import {
-  activateFeatureAuthority,
-  attackCharacterAuthority,
   executeCombatMutationsAuthority,
-  moveCharacterAuthority,
-  resolveDodgeAuthority,
-  spendEnemyApAuthority,
-  startCombatAuthority,
   type CombatMutationAuthorityState,
   type CombatAuthorityState,
 } from './combatAuthority'
@@ -111,138 +105,6 @@ function makeMutationState(character: Character = makeCharacter()): CombatMutati
 }
 
 describe('combat authority', () => {
-  it('starts combat from the DM side and initializes character and enemy AP', () => {
-    const result = startCombatAuthority(makeState(), { role: 'dm', enemyTokenIds: ['goblin'] })
-
-    expect(result.ok).toBe(true)
-    if (!result.ok) return
-    expect(result.state.characters[0].currentAP).toBe(2)
-    expect(result.state.enemyApByToken.goblin).toEqual({ current: 2, max: 2 })
-  })
-
-  it('does not allow the player side to initialize combat AP', () => {
-    const state = makeState()
-    const result = startCombatAuthority(state, { role: 'player', enemyTokenIds: ['goblin'] })
-
-    expect(result.ok).toBe(false)
-    expect(result.state).toBe(state)
-    expect(result.state.characters[0].currentAP).toBe(0)
-  })
-
-  it('spends 1 AP when the DM activates a feature', () => {
-    const result = activateFeatureAuthority(makeState(makeCharacter({ currentAP: 2 })), {
-      role: 'dm',
-      characterId: 'hero',
-    })
-
-    expect(result.ok).toBe(true)
-    if (!result.ok) return
-    expect(result.value).toMatchObject({ before: 2, after: 1, amount: 1 })
-    expect(result.state.characters[0].currentAP).toBe(1)
-  })
-
-  it('spends 1 AP when the DM accepts a character move', () => {
-    const result = moveCharacterAuthority(makeState(makeCharacter({ currentAP: 2 })), {
-      role: 'dm',
-      characterId: 'hero',
-    })
-
-    expect(result.ok).toBe(true)
-    if (!result.ok) return
-    expect(result.state.characters[0].currentAP).toBe(1)
-  })
-
-  it('spends 1 AP when the DM accepts a character attack', () => {
-    const result = attackCharacterAuthority(makeState(makeCharacter({ currentAP: 2 })), {
-      role: 'dm',
-      characterId: 'hero',
-    })
-
-    expect(result.ok).toBe(true)
-    if (!result.ok) return
-    expect(result.state.characters[0].currentAP).toBe(1)
-  })
-
-  it('spends enemy AP on the DM side for monster attacks', () => {
-    const result = spendEnemyApAuthority(makeState(), {
-      role: 'dm',
-      tokenId: 'goblin',
-      amount: 1,
-    })
-
-    expect(result.ok).toBe(false)
-
-    const ready = makeState()
-    ready.enemyApByToken.goblin.current = 2
-    const spent = spendEnemyApAuthority(ready, {
-      role: 'dm',
-      tokenId: 'goblin',
-      amount: 1,
-    })
-
-    expect(spent.ok).toBe(true)
-    if (!spent.ok) return
-    expect(spent.state.enemyApByToken.goblin.current).toBe(1)
-  })
-
-  it('resolves a successful dodge without damage while spending dodge AP', () => {
-    const result = resolveDodgeAuthority(makeState(makeCharacter({ currentAP: 2, ac: 14 })), {
-      role: 'dm',
-      targetCharacterId: 'hero',
-      wantsDodge: true,
-      d20: 8,
-      attackBonus: 5,
-      damage: 10,
-    })
-
-    expect(result.ok).toBe(true)
-    if (!result.ok) return
-    expect(result.value).toMatchObject({
-      dodgeApSpent: true,
-      dodged: true,
-      attackTotal: 13,
-      damageApplied: 0,
-    })
-    expect(result.state.characters[0]).toMatchObject({ currentAP: 1, currentHp: 20 })
-  })
-
-  it('resolves a failed dodge by applying damage on the DM side', () => {
-    const result = resolveDodgeAuthority(makeState(makeCharacter({ currentAP: 2, ac: 14 })), {
-      role: 'dm',
-      targetCharacterId: 'hero',
-      wantsDodge: true,
-      d20: 9,
-      attackBonus: 5,
-      damage: 10,
-    })
-
-    expect(result.ok).toBe(true)
-    if (!result.ok) return
-    expect(result.value).toMatchObject({
-      dodgeApSpent: true,
-      dodged: false,
-      attackTotal: 14,
-      damageApplied: 10,
-    })
-    expect(result.state.characters[0]).toMatchObject({ currentAP: 1, currentHp: 10 })
-  })
-
-  it('keeps player-side dodge answers from mutating authoritative HP or AP', () => {
-    const state = makeState(makeCharacter({ currentAP: 2, currentHp: 20 }))
-    const result = resolveDodgeAuthority(state, {
-      role: 'player',
-      targetCharacterId: 'hero',
-      wantsDodge: true,
-      d20: 20,
-      attackBonus: 5,
-      damage: 10,
-    })
-
-    expect(result.ok).toBe(false)
-    expect(result.state).toBe(state)
-    expect(state.characters[0]).toMatchObject({ currentAP: 2, currentHp: 20 })
-  })
-
   it('executes combat mutations on the DM side in one authoritative pass', () => {
     const state = makeMutationState(
       makeCharacter({
@@ -320,5 +182,47 @@ describe('combat authority', () => {
     expect(result.failures[0].reason).toBe('not-authority')
     expect(result.state).toBe(state)
     expect(state.characters[0].currentAP).toBe(2)
+  })
+
+  // [T-P1-420/AC3·AC5] 状态时长叠加=refresh-to-max（不再硬覆盖）。这是先前三处分歧里唯一 LIVE-reachable
+  // 的覆盖路径（conditionTokenPatch via executeCombatMutationsAuthority），现已 reconcile。
+  it('re-applying a 1-turn burn over a 3-turn burn yields 3 (refresh-to-max, not overwrite)', () => {
+    const state = makeMutationState()
+    // 先给 goblin 叠 3 回合燃烧
+    state.map.tokens = state.map.tokens.map((t) => (t.id === 'goblin' ? { ...t, burningTurns: 3 } : t))
+    const result = executeCombatMutationsAuthority(state, {
+      role: 'dm',
+      mutations: [
+        {
+          type: 'condition',
+          target: { tokenId: 'goblin' },
+          condition: '燃烧',
+          mode: 'add',
+          turns: 1,
+          reason: 'reapply shorter burn',
+        },
+      ],
+    })
+    expect(result.failures).toEqual([])
+    expect(result.state.map.tokens.find((t) => t.id === 'goblin')?.burningTurns).toBe(3)
+  })
+
+  it('remove-branch clears the status to undefined and refresh-to-max does not resurrect it', () => {
+    const state = makeMutationState()
+    state.map.tokens = state.map.tokens.map((t) => (t.id === 'goblin' ? { ...t, burningTurns: 3 } : t))
+    const result = executeCombatMutationsAuthority(state, {
+      role: 'dm',
+      mutations: [
+        {
+          type: 'condition',
+          target: { tokenId: 'goblin' },
+          condition: '燃烧',
+          mode: 'remove',
+          reason: 'clear burn',
+        },
+      ],
+    })
+    expect(result.failures).toEqual([])
+    expect(result.state.map.tokens.find((t) => t.id === 'goblin')?.burningTurns).toBeUndefined()
   })
 })

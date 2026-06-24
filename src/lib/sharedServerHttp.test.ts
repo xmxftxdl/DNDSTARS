@@ -130,12 +130,52 @@ describe('AC5/AC3/AC1 — 404 / 413 / 锁', () => {
     expect(res.status).toBe(413)
   })
 
-  it('两个并发 PUT 都落地为完整 JSON（AC1 锁）', async () => {
+  it('两个并发 PUT：updatedAt=2 胜出，无丢更新、无半写（AC1 锁 + AC6 winner）', async () => {
     await Promise.all([
       putState(offServer.base, 'maps', { maps: [{ id: 'a' }], updatedAt: 1 }),
       putState(offServer.base, 'maps', { maps: [{ id: 'b' }], updatedAt: 2 }),
     ])
     const data = await (await fetch(`${offServer.base}/api/state/maps`)).json()
+    // 完整 JSON（非半写交错）+ 较新的 updatedAt=2 胜出（freshness guard 不让 1 冲掉 2）。
     expect(Array.isArray(data.maps)).toBe(true)
+    expect(data.updatedAt).toBe(2)
+    expect(data.maps[0].id).toBe('b')
+  })
+
+  it('freshness-reject：较旧 updatedAt 在较新之后写入被拒，磁盘保留较新（AC6）', async () => {
+    await putState(offServer.base, 'fresh-maps', { maps: [{ id: 'new' }], updatedAt: 5 })
+    // HTTP 仍 200（freshness 拒绝是静默的），但磁盘内容不被回退。
+    const res = await putState(offServer.base, 'fresh-maps', { maps: [{ id: 'old' }], updatedAt: 3 })
+    expect(res.status).toBe(200)
+    const data = await (await fetch(`${offServer.base}/api/state/fresh-maps`)).json()
+    expect(data.updatedAt).toBe(5)
+    expect(data.maps[0].id).toBe('new')
+  })
+})
+
+describe('AC3/AC4 — 并发图片 PUT 不撕裂、blob/meta 同源', () => {
+  it('两个字节不同、类型不同的并发 PUT：胜者 blob 完整且其 meta 类型与字节同源', async () => {
+    const SIZE = 64 * 1024
+    const payloadA = Buffer.alloc(SIZE, 0xaa)
+    const payloadB = Buffer.alloc(SIZE, 0xbb)
+    const putImage = (bytes: Buffer, type: string) =>
+      fetch(`${offServer.base}/api/images/concurrent-id`, {
+        method: 'PUT',
+        headers: { 'Content-Type': type },
+        body: new Uint8Array(bytes),
+      })
+    await Promise.all([putImage(payloadA, 'image/png'), putImage(payloadB, 'image/webp')])
+
+    const res = await fetch(`${offServer.base}/api/images/concurrent-id`)
+    expect(res.status).toBe(200)
+    const type = res.headers.get('content-type')
+    const bytes = Buffer.from(await res.arrayBuffer())
+    // blob 必须是两个完整 payload 之一（绝非撕裂/混合）。
+    const isA = bytes.length === SIZE && bytes.every((b) => b === 0xaa)
+    const isB = bytes.length === SIZE && bytes.every((b) => b === 0xbb)
+    expect(isA || isB).toBe(true)
+    // meta 类型必须与字节同源（同一次 PUT，不交叉配对）。
+    if (isA) expect(type).toBe('image/png')
+    if (isB) expect(type).toBe('image/webp')
   })
 })

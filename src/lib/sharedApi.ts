@@ -7,7 +7,9 @@ function sharedSecretHeader(): Record<string, string> {
   return secret ? { 'X-Stars-Secret': secret } : {}
 }
 
-function configuredApiBases(): string[] | null {
+// [T-P1-422/AC4] exported for the client-sync-layer unit test (dedup/trim/empty-filter of the
+// configured base list — the routing core of read/double-send-write/single-canonical-event).
+export function configuredApiBases(): string[] | null {
   const configured = import.meta.env.VITE_SHARED_API_BASES as string | undefined
   if (configured) {
     return configured
@@ -37,15 +39,22 @@ function sharedApiCandidates(): string[] {
   return [defaultDmApiBase(), sameOriginApiBase()].filter((value, index, all) => all.indexOf(value) === index)
 }
 
-function sharedWriteApiCandidates(): string[] {
+// [T-P1-422/AC4] state/image WRITES double-send to ALL configured bases (file-backed, idempotent —
+// each process writes the same shared file root). Contrast sharedEventApiCandidates (single canonical).
+export function sharedWriteApiCandidates(): string[] {
   const configured = configuredApiBases()
   if (configured) return configured
   return [defaultDmApiBase()]
 }
 
-function sharedEventApiCandidates(): string[] {
+// [T-P1-421/AC3·AC6 · Option A] 事件（SSE 订阅 + POST + DELETE）只走单一 canonical 端口（DM），
+// 与 state/image 的「双发到所有端口」相反。生产 serve 模式下两个独立 static-server 各有一份进程内
+// eventBacklog；若事件分发到多个端口，重连/迟到的一端会回放到另一份/空 backlog（C2 分歧 bug）。
+// 路由到单一 canonical（已配置时取第一个=DM，否则 defaultDmApiBase）后，全端共享同一份 backlog。
+// 注意：故意 NOT 复用 configured 全列表 —— 那正是分歧根因。
+export function sharedEventApiCandidates(): string[] {
   const configured = configuredApiBases()
-  if (configured) return configured
+  if (configured && configured.length > 0) return [configured[0]]
   return [defaultDmApiBase()]
 }
 

@@ -1,10 +1,11 @@
-﻿import { describe, expect, it } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import {
   clearPendingLocalCharacterCreationsForTest,
   mergeCharactersForSharedSave,
   mergePlayerWritableCharacter,
 } from './characters'
 import { mergePlayerTokenCombatFields, type BattleMap, type Token } from './maps'
+import { decideApply, type MonotonicState } from '../lib/monotonicGuard'
 import type { Character } from '../types/character'
 
 // [T13/AC6] 鍚屾鍚堝苟鍥炲綊锛氱帺瀹剁鍦ㄥ悎骞跺绔紙DM 鏉冨▉锛夊揩鐓ф椂锛屽繀椤讳繚鐣?DM 鐨勮閲?AP/token 浣嶇疆锛?
@@ -54,13 +55,13 @@ function map(patch: Partial<BattleMap>): BattleMap {
   }
 }
 
-describe('T13/AC6 鈥?mergePlayerWritableCharacter keeps DM-authoritative fields', () => {
+describe('T-P1-417/AC3 — mergePlayerWritableCharacter 全量采用 DM shared（Option B，DM-authority）', () => {
   it('keeps DM HP/AP from the shared snapshot during combat (player local value discarded)', () => {
-    // 鐜╁鏈湴鎶婅嚜宸辨不鍒版弧琛€銆丄P 鎷夋弧锛堣秺鏉冿級锛孌M 鏉冨▉蹇収璇翠粬琚墦鍒?12 琛€銆丄P 宸茶姳鍏夈€?
+    // 玩家本地把自己治到满血、AP 拉满（越权），DM 权威快照说他被打到 12 血、AP 已花光。
     const local = char({ currentHp: 40, maxHp: 40, actionPoints: 2, currentAP: 2 })
     const shared = char({ currentHp: 12, maxHp: 40, actionPoints: 0, currentAP: 0 })
     const merged = mergePlayerWritableCharacter(local, shared)
-    // DM 鏉冨▉琛€閲?AP 鑳滃嚭锛堜笉琚帺瀹舵湰鍦拌鐩栵級
+    // DM 权威血量/AP 胜出（不被玩家本地覆盖）
     expect(merged.currentHp).toBe(12)
     expect(merged.actionPoints).toBe(0)
     expect(merged.currentAP).toBe(0)
@@ -143,16 +144,43 @@ describe('T13/AC6 鈥?mergePlayerWritableCharacter keeps DM-authoritative fields
     expect(merged.combatSkills[0]).toMatchObject({ remaining: 2, usedThisTurn: true })
   })
 
-  it('does NOT clobber non-whitelisted local fields (only the whitelist comes from shared)', () => {
-    // name 涓嶅湪鐧藉悕鍗?鈬?淇濈暀鏈湴鍊硷紝涓嶈瀵圭瑕嗙洊銆?
-    const local = char({ name: '鐜╁鏀圭殑鍚嶅瓧', currentHp: 40 })
-    const shared = char({ name: 'DM鏀圭殑鍚嶅瓧', currentHp: 12 })
+  it('AC3 both directions: a DM-only field (name) AND a combat field both take the shared (DM) value', () => {
+    // [T-P1-417 · C6 fix] 此前 base=...local 会让玩家旧快照里的 name 冲掉 DM 改过的 name（DM 编辑丢失）。
+    // Option B 修复后：非白名单的 name 与白名单的战斗字段都取 shared —— 玩家无法在任一方向越权覆盖 DM。
+    const local = char({ name: '玩家旧快照里的名字', currentHp: 40, qi: 9 })
+    const shared = char({ name: 'DM 刚改的新名字', currentHp: 12, qi: 3 })
     const merged = mergePlayerWritableCharacter(local, shared)
-    expect(merged.name).toBe('鐜╁鏀圭殑鍚嶅瓧') // 闈炵櫧鍚嶅崟瀛楁淇濈暀鏈湴
-    expect(merged.currentHp).toBe(12) // 鐧藉悕鍗曞瓧娈靛彇瀵圭
+    expect(merged.name).toBe('DM 刚改的新名字') // 非白名单字段不再保留本地，DM 权威胜出
+    expect(merged.currentHp).toBe(12) // 战斗字段仍取 DM
+    expect(merged.qi).toBe(3)
   })
 })
 
+describe('T-P1-417/AC6 — 单调时钟 + 交错写：两端编辑都不丢失', () => {
+  // 复现 C1：DM 在 t 编辑 A.name，玩家从「t 之前的快照」并发保存。saveCharacters 写盘前会
+  // loadSharedResource 拿到最新 shared 再 merge，故玩家写出的 payload 必然带 DM 的新 name（不丢）。
+  it('player save built from a pre-DM snapshot still carries the DM name edit (no DM loss)', () => {
+    const playerLocalStale = char({ id: 'A', name: '旧名字', currentHp: 40 })
+    const freshSharedAfterDmEdit = char({ id: 'A', name: 'DM 新名字', currentHp: 30 })
+    // 玩家写盘前对最新 shared 做 merge：
+    const whatPlayerWrites = mergePlayerWritableCharacter(playerLocalStale, freshSharedAfterDmEdit)
+    expect(whatPlayerWrites.name).toBe('DM 新名字')
+    expect(whatPlayerWrites.currentHp).toBe(30)
+  })
+
+  // 服务器 freshness guard 会拒绝 updatedAt < existing；两端统一走 decideApply：
+  // 严格更旧的乱序快照被丢弃，较新的被应用 —— 玩家端不再裸接受乱序写而回退。
+  it('decideApply: a stale out-of-order snapshot is rejected; a newer one is applied (symmetric guard)', () => {
+    const state: MonotonicState = { lastUpdatedAt: 0, lastSnapshot: '' }
+    const applyNewer = decideApply(state, 101, JSON.stringify({ name: 'DM 新名字' }))
+    expect(applyNewer.apply).toBe(true)
+    // 一个基于旧快照、updatedAt 更旧的乱序写到达：必须丢弃，不能回退已应用的较新状态。
+    const rejectStale = decideApply(applyNewer.next, 100, JSON.stringify({ name: '玩家旧名字' }))
+    expect(rejectStale.apply).toBe(false)
+    expect(rejectStale.reason).toBe('stale')
+    expect(rejectStale.next.lastSnapshot).toContain('DM 新名字')
+  })
+})
 
 describe('character shared-save merge preserves cross-end creations', () => {
   it('keeps shared-only characters when a stale DM snapshot writes later', () => {

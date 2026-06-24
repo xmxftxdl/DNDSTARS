@@ -6,9 +6,13 @@ import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import {
   EVENT_BACKLOG_LIMIT,
+  EVENT_CHANNEL_LIMIT,
   EVENT_REPLAY_LIMIT,
   IMAGE_COUNT_LIMIT,
+  LockTimeoutError,
+  capEventChannels,
   STATE_MAX_BYTES,
+  atomicWriteImageLocked,
   atomicWriteJsonStateFreshLocked,
   atomicWriteLocked,
   authorizeStateWrite,
@@ -119,6 +123,37 @@ describe('backlog cap — AC3', () => {
   })
 })
 
+describe('capEventChannels — AC5 channel COUNT-CAP（T-P1-421）', () => {
+  it('超过 limit 时按插入序淘汰最旧 channel（确定性）', () => {
+    const m = new Map<string, number[]>()
+    for (let i = 0; i < 5; i += 1) m.set(`ch${i}`, [i])
+    const evicted = capEventChannels(m, 3)
+    expect(evicted).toEqual(['ch0', 'ch1'])
+    expect([...m.keys()]).toEqual(['ch2', 'ch3', 'ch4'])
+  })
+
+  it('未超 limit 不淘汰任何 channel', () => {
+    const m = new Map<string, number[]>([['a', [1]], ['b', [2]]])
+    expect(capEventChannels(m, 8)).toEqual([])
+    expect(m.size).toBe(2)
+  })
+
+  it('受保护（活跃订阅）channel 永不被淘汰（会话中途不清活跃）', () => {
+    const m = new Map<string, number[]>()
+    for (let i = 0; i < 5; i += 1) m.set(`ch${i}`, [i])
+    // ch0 是最旧但活跃 → 跳过它，淘汰次旧的 ch1/ch2。
+    const evicted = capEventChannels(m, 3, new Set(['ch0']))
+    expect(evicted).toEqual(['ch1', 'ch2'])
+    expect(m.has('ch0')).toBe(true)
+    expect(m.size).toBe(3)
+  })
+
+  it('EVENT_CHANNEL_LIMIT 是正数且 < backlog 总量上限', () => {
+    expect(EVENT_CHANNEL_LIMIT).toBeGreaterThan(0)
+    expect(EVENT_CHANNEL_LIMIT).toBeLessThanOrEqual(EVENT_BACKLOG_LIMIT)
+  })
+})
+
 describe('withWriteLock / atomicWriteLocked — AC1 锁', () => {
   let dir: string
   beforeEach(async () => {
@@ -176,6 +211,66 @@ describe('withWriteLock / atomicWriteLocked — AC1 锁', () => {
     )
     expect(accepted).toBe(false)
     expect(JSON.parse(await readFile(file, 'utf8')).value).toBe('new')
+  })
+
+  // [T-P1-419/AC1] 抢锁超时 ⇒ fail-closed：抛 LockTimeoutError(503)，fn 绝不无锁运行。
+  it('AC1 — lock-acquire timeout fails CLOSED (throws, fn never runs)', async () => {
+    const file = path.join(dir, 'busy.json')
+    // 手动占住一把「非陈旧」的锁（刚创建，mtime 新鲜）。
+    await writeFile(`${file}.lock`, 'held-by-other', { flag: 'wx' })
+    process.env.STARS_LOCK_WAIT_MAX_MS = '120'
+    let ran = false
+    try {
+      await expect(
+        withWriteLock(file, async () => {
+          ran = true
+        }),
+      ).rejects.toMatchObject({ name: 'LockTimeoutError', code: 'ELOCKTIMEOUT', statusCode: 503 })
+      expect(ran).toBe(false)
+      // 占用的锁未被错误删除（我们没持有它）。
+      await expect(stat(`${file}.lock`)).resolves.toBeTruthy()
+      expect(new LockTimeoutError('x').statusCode).toBe(503)
+    } finally {
+      delete process.env.STARS_LOCK_WAIT_MAX_MS
+      await rm(`${file}.lock`, { force: true })
+    }
+  })
+
+  // [T-P1-419/AC2] 持锁期间心跳刷新 lockfile mtime ⇒ 合法慢写不会因 mtime 老化被判陈旧而被抢占。
+  it('AC2 — the held lock mtime is heartbeated while a slow write runs', async () => {
+    process.env.STARS_LOCK_HEARTBEAT_MS = '40'
+    process.env.STARS_LOCK_STALE_MS = '120'
+    const file = path.join(dir, 'slow.json')
+    let mtimeAtStart = 0
+    let mtimeLate = 0
+    try {
+      await withWriteLock(file, async () => {
+        mtimeAtStart = (await stat(`${file}.lock`)).mtimeMs
+        // 持锁 200ms（> staleMs 120ms）；若无心跳，第二进程会判定陈旧并抢占。
+        await new Promise((r) => setTimeout(r, 200))
+        mtimeLate = (await stat(`${file}.lock`)).mtimeMs
+      })
+      // 心跳已把 mtime 推进（持锁期间始终「新鲜」）。
+      expect(mtimeLate).toBeGreaterThan(mtimeAtStart)
+    } finally {
+      delete process.env.STARS_LOCK_HEARTBEAT_MS
+      delete process.env.STARS_LOCK_STALE_MS
+    }
+  })
+
+  // [T-P1-419/AC3] 图片写：blob+meta 在同一把锁内各自 temp+rename 原子落盘。
+  it('AC3 — atomicWriteImageLocked writes blob + meta atomically and releases the lock', async () => {
+    const imgPath = path.join(dir, 'img-xyz')
+    const metaPath = `${imgPath}.json`
+    await atomicWriteImageLocked(
+      imgPath,
+      metaPath,
+      Buffer.from([1, 2, 3, 4]),
+      JSON.stringify({ type: 'image/png' }),
+    )
+    expect([...(await readFile(imgPath))]).toEqual([1, 2, 3, 4])
+    expect(JSON.parse(await readFile(metaPath, 'utf8')).type).toBe('image/png')
+    await expect(stat(`${imgPath}.lock`)).rejects.toBeTruthy()
   })
 })
 
